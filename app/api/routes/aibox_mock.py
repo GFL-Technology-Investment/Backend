@@ -17,7 +17,6 @@ router = APIRouter()
 @router.post("/mock/aibox/lpr-event")
 async def mock_aibox_lpr_event(
     request: Request,
-    event_uid: Optional[str] = Form(None, description="event_uid tùy chọn để test retry duplicate từ camera/AIBox"),
     plate_number: str = Form(..., description="Biển số xe, ví dụ 30A12345"),
     organization_id: Optional[str] = Form(None, include_in_schema=False),
     location_id: str = Form("loc-001"),
@@ -213,7 +212,6 @@ async def mock_aibox_lpr_event(
 
 
 @router.post("/mock/aibox/link-vehicle-to-person")
-@router.post("/mock/aibox/link-vehicle-to-waiting-person")
 async def link_vehicle_to_waiting_person(
     request: Request,
     person_event_uid: str = Form(..., description="event_uid dạng PERSON-... trả về từ /ocr/cccd khi người OCR trước"),
