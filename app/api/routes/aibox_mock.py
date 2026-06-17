@@ -10,7 +10,8 @@ from app.core.config import settings
 from app.services.access_service import *
 from app.services.ocr_service import extract_cccd
 from app.services.face_service import compare_face_image_paths, get_face_model_status
-
+from app.core.security import AuthError
+from app.core.status import ORG_MISMATCH
 router = APIRouter()
 
 @router.post("/mock/aibox/lpr-event")
@@ -18,7 +19,7 @@ async def mock_aibox_lpr_event(
     request: Request,
     event_uid: Optional[str] = Form(None, description="event_uid tùy chọn để test retry duplicate từ camera/AIBox"),
     plate_number: str = Form(..., description="Biển số xe, ví dụ 30A12345"),
-    organization_id: str = Form("org-001"),
+    organization_id: Optional[str] = Form(None, include_in_schema=False),
     location_id: str = Form("loc-001"),
     gate_id: str = Form("gate-001"),
     gate_name: str = Form("Cổng vào 01"),
@@ -29,6 +30,19 @@ async def mock_aibox_lpr_event(
     driver_face_image: Optional[UploadFile] = File(None, description="Ảnh mặt tài xế từ camera nếu có"),
     db: sqlite3.Connection = Depends(get_db),
 ):
+    camera_auth = getattr(request.state, "camera_auth", None)
+    if camera_auth is not None:
+        if organization_id and organization_id != camera_auth.organization_id:
+            raise AuthError(
+            403,
+            ORG_MISMATCH,
+            "organization_id trong Form body không khớp với X-Organization-ID đã verify",
+        )
+
+        organization_id = camera_auth.organization_id
+        camera_id = camera_auth.camera_code
+        camera_name = camera_auth.camera_name or camera_name
+        
     plate_number = normalize_plate_number(validate_required_text(plate_number, "plate_number"))
     event_uid = event_uid or f"LPR-{uuid.uuid4().hex[:12]}"
     current_time = now_vn()

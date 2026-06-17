@@ -1,0 +1,38 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Local database
+*.db
+*.sqlite
+*.sqlite3
+access_control.db
+
+# Runtime/generated files
+uploads/
+static/media/
+static/tickets/
+static/cccd_faces/
+static/cccd_originals/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Logs / cache
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

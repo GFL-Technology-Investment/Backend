@@ -2,6 +2,9 @@ import os
 import sqlite3
 from typing import AsyncIterator, Optional, Dict, Any, List
 
+from app.core.config import settings
+from app.core.security import hash_camera_token
+
 DB_PATH = os.getenv("ACCESS_DB_PATH", "access_control.db")
 
 
@@ -42,6 +45,61 @@ CREATE TABLE IF NOT EXISTS access_sessions (
     updated_at TEXT NOT NULL
 );
 """
+
+AUTH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS organizations (
+    organization_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    full_name TEXT,
+    organization_id TEXT NOT NULL,
+    roles TEXT NOT NULL DEFAULT '[]',
+    permissions TEXT NOT NULL DEFAULT '[]',
+    azure_user_id TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (organization_id) REFERENCES organizations(organization_id)
+);
+
+CREATE TABLE IF NOT EXISTS camera_clients (
+    camera_client_id TEXT PRIMARY KEY,
+    client_code TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    client_type TEXT NOT NULL DEFAULT 'CAMERA',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS camera_client_organizations (
+    camera_client_id TEXT NOT NULL,
+    organization_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (camera_client_id, organization_id),
+    FOREIGN KEY (camera_client_id) REFERENCES camera_clients(camera_client_id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS camera_tokens (
+    token_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera_client_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    scope TEXT NOT NULL DEFAULT '["camera.event.write"]',
+    expires_at TEXT,
+    is_revoked INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (camera_client_id) REFERENCES camera_clients(camera_client_id) ON DELETE CASCADE
+);
+"""
+
 
 
 def get_connection() -> sqlite3.Connection:
@@ -192,10 +250,74 @@ def migrate_person_logs_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE person_access_logs ADD COLUMN cccd_image_hash TEXT")
 
 
+def seed_auth_data(conn: sqlite3.Connection) -> None:
+    """Seed dữ liệu auth tối thiểu để test local.
+
+    Token camera plaintext chỉ xuất hiện trong README/config env; DB chỉ lưu hash.
+    """
+
+    conn.execute(
+        "INSERT OR IGNORE INTO organizations (organization_id, name, is_active) VALUES (?, ?, 1)",
+        (settings.default_organization_id, "Sân Nội Bài / Org test"),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO organizations (organization_id, name, is_active) VALUES (?, ?, 1)",
+        ("org-002", "Sân Tân Sơn Nhất / Org test"),
+    )
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO users (
+            user_id, email, full_name, organization_id, roles, permissions, azure_user_id, is_active, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+        """,
+        (
+            "user-dev-001",
+            "guard@company.com",
+            "Guard Dev",
+            settings.default_organization_id,
+            '["guard"]',
+            '["ocr.cccd.create","face.compare","ticket.issue","ticket.print","access.checkout","history.read","*"]',
+            "azure-dev-user-001",
+        ),
+    )
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO camera_clients (
+            camera_client_id, client_code, name, client_type, is_active, updated_at
+        ) VALUES (?, ?, ?, 'CAMERA', 1, CURRENT_TIMESTAMP)
+        """,
+        (settings.dev_camera_client_id, settings.dev_camera_code, settings.dev_camera_name),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO camera_client_organizations (camera_client_id, organization_id) VALUES (?, ?)",
+        (settings.dev_camera_client_id, settings.default_organization_id),
+    )
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO camera_tokens (
+            token_id, camera_client_id, token_hash, scope, expires_at, is_revoked, updated_at
+        )
+        VALUES (
+            COALESCE((SELECT token_id FROM camera_tokens WHERE camera_client_id = ? LIMIT 1), NULL),
+            ?, ?, '["camera.event.write"]', NULL, 0, CURRENT_TIMESTAMP
+        )
+        """,
+        (
+            settings.dev_camera_client_id,
+            settings.dev_camera_client_id,
+            hash_camera_token(settings.dev_camera_token),
+        ),
+    )
+
+
 def init_db() -> None:
     with get_connection() as conn:
         conn.executescript(
             ACCESS_SESSIONS_SCHEMA
+            + AUTH_SCHEMA
             + """
             CREATE TABLE IF NOT EXISTS vehicle_access_logs (
                 event_uid TEXT PRIMARY KEY,
@@ -294,6 +416,7 @@ def init_db() -> None:
         migrate_access_sessions_schema(conn)
         migrate_tickets_schema(conn)
         migrate_person_logs_schema(conn)
+        seed_auth_data(conn)
         conn.executescript(
             """
             CREATE INDEX IF NOT EXISTS idx_access_sessions_event_uid ON access_sessions(event_uid);
@@ -327,6 +450,11 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_tickets_issued_at ON tickets(issued_at);
 
             CREATE INDEX IF NOT EXISTS idx_ticket_print_logs_ticket_id ON ticket_print_logs(ticket_id);
+
+            CREATE INDEX IF NOT EXISTS idx_auth_users_email ON users(email);
+            CREATE INDEX IF NOT EXISTS idx_auth_users_org ON users(organization_id);
+            CREATE INDEX IF NOT EXISTS idx_auth_camera_tokens_hash ON camera_tokens(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_auth_camera_org ON camera_client_organizations(camera_client_id, organization_id);
             """
         )
         conn.commit()

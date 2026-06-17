@@ -190,11 +190,18 @@ def render_ticket_images(
     draw.text((50, 195), f"Cổng: {session.get('gate_name') or '-'}", font=text_font, fill="black")
 
     barcode_img = Image.open(barcode_path).convert("RGB")
-    barcode_img.thumbnail((420, 90))
+    barcode_img.thumbnail((380, 85))
     back.paste(barcode_img, (55, 245))
+
     qr_img = Image.open(qr_path).convert("RGB")
-    qr_img.thumbnail((95, 95))
-    back.paste(qr_img, (505, 230))
+    qr_size = 150
+    qr_img.thumbnail((qr_size, qr_size))
+    right_section_x = 420
+    right_section_w = card_w - right_section_x - 20
+    qr_x = right_section_x + (right_section_w - qr_img.width) // 2
+    qr_y = (card_h - qr_img.height) // 2
+    back.paste(qr_img, (qr_x, qr_y))
+
     back.save(back_path)
 
     return {
@@ -203,5 +210,4 @@ def render_ticket_images(
         "barcode_image_url": absolute_url(request, to_static_url(barcode_path)),
         "qr_image_url": absolute_url(request, to_static_url(qr_path)),
         "qr_value": qr_value,
-        "barcode_value": ticket_code,
     }

@@ -10,7 +10,8 @@ from app.core.config import settings
 from app.services.access_service import *
 from app.services.ocr_service import extract_cccd
 from app.services.face_service import compare_face_image_paths, get_face_model_status
-
+from app.core.security import AuthError
+from app.core.status import ORG_MISMATCH
 router = APIRouter()
 
 @router.post("/ocr/cccd")
@@ -69,11 +70,18 @@ async def ocr_cccd(
         vehicle_log = get_vehicle_log(db, event_uid)
         if not vehicle_log:
             raise HTTPException(status_code=404, detail="event_uid không tồn tại trong vehicle_access_logs")
-
+        
         session = get_session_by_id(db, vehicle_log["session_id"])
         if not session:
             raise HTTPException(status_code=404, detail="Không tìm thấy session tương ứng event_uid")
-
+        vehicle_org_id = vehicle_log.get("organization_id")
+        session_org_id = session.get("organization_id")
+        if vehicle_org_id != organization_id or session_org_id != organization_id:
+            raise AuthError(
+                 403,
+                 ORG_MISMATCH,
+                 "Không được ghép CCCD của organization này với xe/session thuộc organization khác",
+             )
         assert_can_link_person_to_vehicle(session)
 
         existing_person = get_person_log_by_session_id(db, session["session_id"])
