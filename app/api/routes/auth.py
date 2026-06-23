@@ -19,7 +19,7 @@ class DevLoginRequest(BaseModel):
 
     user_id: str = Field("user-dev-001", description="Internal user id/sub")
     email: str = Field("guard@company.com", description="Email công ty")
-    org_id: str = Field("org-002", description="Organization đang thao tác")
+    org_id: str = Field("org-001", description="Organization đang thao tác")
     roles: List[str] = Field(default_factory=lambda: ["guard"])
     permissions: List[str] = Field(default_factory=lambda: ["*"])
 
