@@ -73,10 +73,12 @@ async def ocr_cccd(
         
         session = get_session_by_id(db, vehicle_log["session_id"])
         if not session:
-            raise HTTPException(status_code=404, detail="Không tìm thấy session tương ứng event_uid")
-        vehicle_org_id = vehicle_log.get("organization_id")
+            raise HTTPException(
+                status_code=404,
+                detail="Không tìm thấy session tương ứng event_uid"
+         )
         session_org_id = session.get("organization_id")
-        if vehicle_org_id != organization_id or session_org_id != organization_id:
+        if session_org_id  != organization_id:
             raise AuthError(
                  403,
                  ORG_MISMATCH,

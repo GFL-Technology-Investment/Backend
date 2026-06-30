@@ -58,6 +58,10 @@ async def require_internal_auth(
     db: sqlite3.Connection = Depends(get_db),
 ) -> InternalAuthContext:
     """Verify JWT nội bộ và inject InternalAuthContext vào request.state."""
+    print("========== AUTH ==========")
+    print("Headers:", dict(request.headers))
+    print("Credentials:", credentials)
+    print("==========================")
 
     if not settings.auth_enabled:
         context = InternalAuthContext(
@@ -74,9 +78,12 @@ async def require_internal_auth(
     if raw_token is None:
         # fallback để vẫn hỗ trợ client gửi header thủ công trong một số proxy/test tool
         raw_token = extract_bearer_token(request.headers.get("Authorization"))
+    print("1. Before decode")
     payload = decode_internal_jwt(raw_token)
-
+    print("2. After decode")
+    print(payload)
     user_id = str(payload.get("sub") or payload.get("user_id") or "")
+    print("3. user_id =", user_id)
     email = str(payload.get("email") or "")
     organization_id = str(payload.get("org_id") or payload.get("organization_id") or "")
     roles = [str(item) for item in payload.get("roles", [])]
@@ -86,6 +93,7 @@ async def require_internal_auth(
         raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Internal token missing required claims")
 
     row = db.execute("SELECT * FROM users WHERE user_id = ? AND is_active = 1", (user_id,)).fetchone()
+    print("4. DB row =", row)
     if not row:
         raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Internal user not found or inactive")
 
