@@ -23,6 +23,7 @@ async def mock_aibox_lpr_event(
     gate_id: str = Form("gate-001"),
     gate_name: str = Form("Cổng vào 01"),
     camera_id: str = Form("cam-gate-01"),
+    event_uid: Optional[str] = Form(None, description="UID của event, để trống thì BE tự sinh"),
     camera_name: str = Form("Camera cổng vào 01"),
     plate_image: UploadFile = File(..., description="Ảnh crop biển số"),
     frame_image: UploadFile = File(..., description="Ảnh toàn cảnh"),
