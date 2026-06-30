@@ -26,6 +26,7 @@ dependencies = [
     "qrcode[pil]>=7.4.2",
     "insightface>=0.7.3",
     "python-barcode>=0.15.1",
+    "redis>=8.0.1",
 ]
 
 [tool.uv]
