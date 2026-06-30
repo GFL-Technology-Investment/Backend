@@ -75,9 +75,8 @@ def generate_barcode_image(ticket_code: str, out_path: str) -> None:
             options={
                 "module_width": 0.35,
                 "module_height": 22,
-                "font_size": 12,
-                "text_distance": 3,
                 "quiet_zone": 3,
+                "write_text": False,
             },
         )
         if generated_path != out_path and os.path.exists(generated_path):
@@ -98,8 +97,6 @@ def generate_barcode_image(ticket_code: str, out_path: str) -> None:
         x += bar_w + 1
         if x >= width - 12:
             break
-    font = load_ticket_font(12)
-    draw_centered(draw, (0, height - 20), width, ticket_code, font)
     img.save(out_path)
 
 

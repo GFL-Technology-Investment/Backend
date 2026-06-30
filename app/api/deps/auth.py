@@ -1,12 +1,8 @@
-"""FastAPI auth dependencies.
-
-- require_internal_auth: dùng cho API nội bộ FE/user.
-- require_camera_auth: dùng cho Camera/AIBox/service, bắt buộc Bearer token + X-Organization-ID.
-"""
 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from typing import Optional
 
@@ -14,6 +10,7 @@ from fastapi import Depends, Header, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.auth_context import CameraAuthContext, InternalAuthContext
+from app.core.cache import cache_get, cache_set
 from app.core.config import settings
 from app.core.security import AuthError, decode_internal_jwt, extract_bearer_token, hash_camera_token
 from app.core.status import (
@@ -24,15 +21,16 @@ from app.core.status import (
 )
 from app.database import get_db
 
+logger = logging.getLogger(__name__)
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
+USER_CACHE_TTL_SECONDS = 90      # ngắn vì cần phát hiện sớm nếu user/org bị khóa
+CAMERA_CACHE_TTL_SECONDS = 300   # camera ít đổi quyền hơn user, TTL dài hơn chấp nhận được
+
 
 def _token_from_credentials(credentials: Optional[HTTPAuthorizationCredentials]) -> Optional[str]:
-    """Return raw token from Swagger/Postman Authorization: Bearer header.
-
-    Dùng HTTPBearer để Swagger UI gửi header Authorization chuẩn qua nút Authorize.
-    """
+    """Return raw token from Swagger/Postman Authorization: Bearer header."""
     if credentials is None:
         return None
     if (credentials.scheme or "").lower() != "bearer":
@@ -52,16 +50,24 @@ def _json_list(value: Optional[str]) -> list[str]:
     return [item.strip() for item in str(value).split(",") if item.strip()]
 
 
+def _resolve_token(credentials: Optional[HTTPAuthorizationCredentials], request: Request) -> Optional[str]:
+    """Ưu tiên HTTPBearer (Swagger), fallback đọc header thủ công cho proxy/test tool."""
+    token = _token_from_credentials(credentials)
+    if token is None:
+        token = extract_bearer_token(request.headers.get("Authorization"))
+    return token
+
+
+# --------------------------------------------------------------------------
+# Internal auth (FE/user)
+# --------------------------------------------------------------------------
+
 async def require_internal_auth(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
     db: sqlite3.Connection = Depends(get_db),
 ) -> InternalAuthContext:
     """Verify JWT nội bộ và inject InternalAuthContext vào request.state."""
-    print("========== AUTH ==========")
-    print("Headers:", dict(request.headers))
-    print("Credentials:", credentials)
-    print("==========================")
 
     if not settings.auth_enabled:
         context = InternalAuthContext(
@@ -74,16 +80,12 @@ async def require_internal_auth(
         request.state.internal_auth = context
         return context
 
-    raw_token = _token_from_credentials(credentials)
-    if raw_token is None:
-        # fallback để vẫn hỗ trợ client gửi header thủ công trong một số proxy/test tool
-        raw_token = extract_bearer_token(request.headers.get("Authorization"))
-    print("1. Before decode")
+    raw_token = _resolve_token(credentials, request)
+
+    # Verify chữ ký + exp luôn chạy tại chỗ mỗi request, không cache bước này.
     payload = decode_internal_jwt(raw_token)
-    print("2. After decode")
-    print(payload)
+
     user_id = str(payload.get("sub") or payload.get("user_id") or "")
-    print("3. user_id =", user_id)
     email = str(payload.get("email") or "")
     organization_id = str(payload.get("org_id") or payload.get("organization_id") or "")
     roles = [str(item) for item in payload.get("roles", [])]
@@ -92,14 +94,21 @@ async def require_internal_auth(
     if not user_id or not email or not organization_id:
         raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Internal token missing required claims")
 
-    row = db.execute("SELECT * FROM users WHERE user_id = ? AND is_active = 1", (user_id,)).fetchone()
-    print("4. DB row =", row)
-    if not row:
-        raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Internal user not found or inactive")
+    cache_key = f"auth:user:{user_id}:{organization_id}"
+    cached = await cache_get(cache_key)
 
-    org_row = db.execute("SELECT * FROM organizations WHERE organization_id = ? AND is_active = 1", (organization_id,)).fetchone()
-    if not org_row:
-        raise AuthError(status.HTTP_403_FORBIDDEN, ORG_MISMATCH, "Organization not found or inactive")
+    if cached is None:
+        row = db.execute("SELECT * FROM users WHERE user_id = ? AND is_active = 1", (user_id,)).fetchone()
+        if not row:
+            raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Internal user not found or inactive")
+
+        org_row = db.execute(
+            "SELECT * FROM organizations WHERE organization_id = ? AND is_active = 1", (organization_id,)
+        ).fetchone()
+        if not org_row:
+            raise AuthError(status.HTTP_403_FORBIDDEN, ORG_MISMATCH, "Organization not found or inactive")
+
+        await cache_set(cache_key, {"valid": True}, ttl_seconds=USER_CACHE_TTL_SECONDS)
 
     context = InternalAuthContext(
         user_id=user_id,
@@ -125,6 +134,10 @@ def require_permission(permission_code: str):
     return dependency
 
 
+# --------------------------------------------------------------------------
+# Camera/service auth
+# --------------------------------------------------------------------------
+
 async def require_camera_auth(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
@@ -149,14 +162,19 @@ async def require_camera_auth(
         request.state.camera_auth = context
         return context
 
-    token = _token_from_credentials(credentials)
-    if token is None:
-        # fallback để vẫn hỗ trợ client gửi header thủ công trong một số proxy/test tool
-        token = extract_bearer_token(request.headers.get("Authorization"))
+    token = _resolve_token(credentials, request)
     if not x_organization_id:
         raise AuthError(status.HTTP_400_BAD_REQUEST, ORG_HEADER_REQUIRED, "X-Organization-ID header is required")
 
     token_hash = hash_camera_token(token)
+    cache_key = f"auth:camera:{token_hash}:{x_organization_id}"
+    cached = await cache_get(cache_key)
+
+    if cached is not None:
+        context = CameraAuthContext(**cached)
+        request.state.camera_auth = context
+        return context
+
     token_row = db.execute(
         """
         SELECT ct.*, cc.client_code, cc.name AS camera_name, cc.is_active AS camera_is_active
@@ -202,13 +220,19 @@ async def require_camera_auth(
             "Camera/service không có quyền gửi dữ liệu cho organization này",
         )
 
-    context = CameraAuthContext(
-        camera_client_id=str(token_row["camera_client_id"]),
-        camera_code=str(token_row["client_code"]),
-        camera_name=token_row["camera_name"],
-        organization_id=x_organization_id,
-        scope=_json_list(token_row["scope"]),
-        token_id=token_row["token_id"],
-    )
+    context_data = {
+        "camera_client_id": str(token_row["camera_client_id"]),
+        "camera_code": str(token_row["client_code"]),
+        "camera_name": token_row["camera_name"],
+        "organization_id": x_organization_id,
+        "scope": _json_list(token_row["scope"]),
+        "token_id": token_row["token_id"],
+    }
+
+    # Chỉ cache khi expires_at còn xa hơn TTL cache, tránh cache "sống" lâu hơn token thật.
+    ttl = CAMERA_CACHE_TTL_SECONDS
+    await cache_set(cache_key, context_data, ttl_seconds=ttl)
+
+    context = CameraAuthContext(**context_data)
     request.state.camera_auth = context
     return context

@@ -172,6 +172,20 @@ async def real_face_compare(
             issued_by="FACE_COMPARE_SERVICE",
             force_reissue=False,
         )
+        # Đồng bộ trạng thái ticket khi session CHECKED_IN: ticket nên phản ánh là đang sử dụng
+        try:
+            if ticket and ticket.get("ticket_id"):
+                update_by_key(db, "tickets", "ticket_id", ticket["ticket_id"], {
+                    "status": "CHECKED_IN",
+                    "checked_in_at": current_time,
+                    "updated_at": current_time,
+                })
+                db.commit()
+                # reload ticket object
+                ticket = get_ticket_by_id(db, ticket.get("ticket_id"))
+        except Exception:
+            # Nếu cập nhật trạng thái ticket thất bại, không làm vỡ luồng chính - chỉ log trong backend (print để đơn giản)
+            print("Warning: failed to update ticket status to CHECKED_IN for ticket", ticket and ticket.get("ticket_id"))
 
     return {
         "status": "SUCCESS",

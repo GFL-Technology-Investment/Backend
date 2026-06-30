@@ -94,6 +94,7 @@ async def checkout_by_ticket_code(
             "data": {
                 "session": session,
                 "ticket": ticket,
+                "person": get_person_log(db, session.get("event_uid")),
             },
         }
     if session.get("status") != "CHECKED_IN":
@@ -117,6 +118,7 @@ async def checkout_by_ticket_code(
         "message": "Đã checkout bằng ticket_code.",
         "data": {
             "session": get_session_by_id(db, session["session_id"]),
+            "person": get_person_log(db, session["event_uid"]),
             "ticket": get_ticket_by_id(db, ticket["ticket_id"]),
         },
     }
