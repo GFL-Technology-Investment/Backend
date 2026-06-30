@@ -163,7 +163,7 @@ async def real_face_compare(
 
     updated_session = get_session_by_id(db, session["session_id"])
     ticket = None
-    if issue_ticket and updated_session and updated_session.get("status") == "CHECKED_IN":
+    if updated_session and updated_session.get("status") == "CHECKED_IN":
         ticket = issue_ticket_for_session(
             db=db,
             request=request,
