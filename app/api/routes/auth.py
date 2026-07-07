@@ -18,19 +18,13 @@ from app.database import get_db
 
 router = APIRouter(prefix="/api/v1/auth")
 
-
-# ==========================================================
-# DEV LOGIN
-# ==========================================================
-
-
 class DevLoginRequest(BaseModel):
     username: str
     password: str
 
 
 DEV_USERS = {
-    "guard@example.com": {
+    "guard@company.com": {
         "user_id": "user-dev-001",
         "password": "123456",
         "email": "guard@example.com",
@@ -97,11 +91,6 @@ async def dev_login(payload: DevLoginRequest):
     }
 
 
-# ==========================================================
-# CURRENT USER
-# ==========================================================
-
-
 @router.get("/me")
 async def get_me(
     auth: InternalAuthContext = Depends(require_internal_auth),
@@ -110,11 +99,6 @@ async def get_me(
         "status": "SUCCESS",
         "data": auth.to_dict(),
     }
-
-
-# ==========================================================
-# DEV CAMERA TOKEN
-# ==========================================================
 
 
 @router.get("/dev-camera-token")
@@ -301,4 +285,18 @@ async def azure_exchange(
             "roles": roles,
             "permissions": permissions,
         },
+    }
+@router.post("/logout")
+async def logout(
+    auth: InternalAuthContext = Depends(require_internal_auth),
+):
+    logout_url = (
+        f"{settings.azure_issuer}"
+        "/protocol/openid-connect/logout"
+        f"?post_logout_redirect_uri={settings.frontend_url}/login"
+    )
+
+    return {
+        "status": "SUCCESS",
+        "logout_url": logout_url,
     }

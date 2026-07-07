@@ -75,6 +75,10 @@ class Settings:
     azure_roles_claim: str = os.getenv("AZURE_ROLES_CLAIM", "roles")
     azure_permissions_claim: str = os.getenv("AZURE_PERMISSIONS_CLAIM", "permissions")
 
+    frontend_url: str = os.getenv(
+        "FRONTEND_URL",
+        "http://localhost:5174",
+    )
 
 settings = Settings()
 
