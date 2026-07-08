@@ -411,6 +411,23 @@ def init_db() -> None:
 
                 FOREIGN KEY (ticket_id) REFERENCES tickets(ticket_id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                audit_log_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL CHECK (event_type IN (
+                'OCR_CCCD', 'FACE_COMPARE', 'VEHICLE_DETECTED', 'VEHICLE_LINKED',
+                'CHECK_OUT', 'TICKET_ISSUED', 'TICKET_PRINTED', 'TICKET_CHECKOUT'
+            )),
+                    session_id TEXT,
+                    event_uid TEXT,
+                    organization_id TEXT,
+                    gate_id TEXT,
+                    actor_type TEXT CHECK (actor_type IN ('CAMERA', 'GUARD', 'SYSTEM')),
+                    actor_id TEXT,
+                    result_status TEXT NOT NULL DEFAULT 'SUCCESS',
+                    detail TEXT,
+                    created_at TEXT NOT NULL
+        );
+   
             """
         )
         migrate_access_sessions_schema(conn)

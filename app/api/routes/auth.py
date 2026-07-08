@@ -24,13 +24,23 @@ class DevLoginRequest(BaseModel):
 
 
 DEV_USERS = {
-    "guard@company.com": {
+     "guard@company.com": {
         "user_id": "user-dev-001",
         "password": "123456",
-        "email": "guard@example.com",
+        "email": "guard@company.com",
         "org_id": "org-001",
         "roles": ["guard"],
-        "permissions": ["*"],
+        "permissions": [
+            "ocr.cccd.create", "face.compare", "ticket.issue", 
+            "ticket.print", "access.checkout", "history.read"
+        ],
+        "camera": {
+            "camera_id": "camera-dev-001",
+            "camera_token": settings.dev_camera_token,
+            "org_id": "org-001",
+            "location_id": "loc-001",
+            "gate_id": "gate-001"
+        }
     },
     "admin@example.com": {
         "user_id": "user-dev-002",
@@ -88,6 +98,7 @@ async def dev_login(payload: DevLoginRequest):
             "roles": user["roles"],
             "permissions": user["permissions"],
         },
+        "camera": user.get("camera"),
     }
 
 

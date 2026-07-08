@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.services.access_service import *
 from app.services.ocr_service import extract_cccd
 from app.services.face_service import compare_face_image_paths, get_face_model_status
-
+from app.services.audit_service import write_audit_log
 router = APIRouter()
 
 @router.post("/api/v1/face/compare")
@@ -21,7 +21,7 @@ async def real_face_compare(
     cccd_face_image: Optional[UploadFile] = File(None, description="Ảnh mặt CCCD tùy chọn. Nếu bỏ trống sẽ dùng cccd_face_image_url/cccd_original_image_url trong DB."),
     threshold: float = Form(0.45, description="Ngưỡng InsightFace cosine similarity. Có thể hiệu chỉnh theo dữ liệu thực tế."),
     source: str = Form("CAMERA", description="CAMERA hoặc GUARD_CAPTURE"),
-    issue_ticket: bool = Form(False, description="True để tự tạo vé ngay khi MATCH -> CHECKED_IN"),
+    issue_ticket: bool = Form(True, description="True để tự tạo vé ngay khi MATCH -> CHECKED_IN"),
     db: sqlite3.Connection = Depends(get_db),
 ):
     """So sánh mặt thật bằng InsightFace.
@@ -159,6 +159,13 @@ async def real_face_compare(
         session_update_data["link_policy"] = "PERSON_ONLY_LOCKED"
 
     update_by_key(db, "access_sessions", "session_id", session["session_id"], session_update_data)
+    write_audit_log(
+        db, "FACE_COMPARE",
+        session_id=session["session_id"], event_uid=event_uid,
+        actor_type=source if source in ("CAMERA", "GUARD_CAPTURE") else "SYSTEM",
+        result_status=final_result,
+        detail={"score": round(score, 4), "threshold": threshold},
+    )
     db.commit()
 
     updated_session = get_session_by_id(db, session["session_id"])
@@ -172,7 +179,7 @@ async def real_face_compare(
             issued_by="FACE_COMPARE_SERVICE",
             force_reissue=False,
         )
-
+    db.commit()
     return {
         "status": "SUCCESS",
         "data": {
