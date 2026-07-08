@@ -17,11 +17,6 @@ from jwt import (
 
 from app.core.config import settings
 
-
-# ==========================================================
-# JWKS CLIENT
-# ==========================================================
-
 @lru_cache(maxsize=1)
 def get_jwk_client() -> PyJWKClient:
     if not settings.azure_jwks_url:
@@ -29,10 +24,6 @@ def get_jwk_client() -> PyJWKClient:
 
     return PyJWKClient(settings.azure_jwks_url)
 
-
-# ==========================================================
-# at_hash
-# ==========================================================
 
 def calculate_at_hash(access_token: str) -> str:
     digest = hashlib.sha256(access_token.encode()).digest()
@@ -44,11 +35,6 @@ def calculate_at_hash(access_token: str) -> str:
         .decode()
         .rstrip("=")
     )
-
-
-# ==========================================================
-# VERIFY OIDC
-# ==========================================================
 
 async def verify_oidc_tokens(
     *,
@@ -128,10 +114,6 @@ async def verify_oidc_tokens(
             },
         )
 
-
-# ==========================================================
-# CLAIM HELPERS
-# ==========================================================
 
 def get_claim(
     claims: dict[str, Any],

@@ -427,6 +427,18 @@ def init_db() -> None:
                     detail TEXT,
                     created_at TEXT NOT NULL
         );
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                    refresh_token_id TEXT PRIMARY KEY,
+                    user_id          TEXT NOT NULL,
+                    token_hash       TEXT NOT NULL UNIQUE,
+                    organization_id  TEXT NOT NULL,
+                    issued_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    expires_at       TEXT NOT NULL,
+                    is_revoked       INTEGER NOT NULL DEFAULT 0,
+                    replaced_by      TEXT,
+                    created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                );
    
             """
         )
@@ -472,6 +484,10 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_auth_users_org ON users(organization_id);
             CREATE INDEX IF NOT EXISTS idx_auth_camera_tokens_hash ON camera_tokens(token_hash);
             CREATE INDEX IF NOT EXISTS idx_auth_camera_org ON camera_client_organizations(camera_client_id, organization_id);
-            """
+
+            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash    ON refresh_tokens(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires  ON refresh_tokens(expires_at);
+         """
         )
         conn.commit()

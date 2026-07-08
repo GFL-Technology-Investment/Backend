@@ -134,3 +134,17 @@ def verify_camera_token_hash(token: str, token_hash: str) -> bool:
 
 def generate_token(prefix: str = "tok") -> str:
     return f"{prefix}_{secrets.token_urlsafe(32)}"
+
+def generate_refresh_token() -> str:
+    """Sinh refresh token ngẫu nhiên 256-bit entropy, prefix rõ loại."""
+    return f"gfl_refresh_{secrets.token_urlsafe(32)}"
+
+
+def hash_refresh_token(token: str) -> str:
+    """Hash refresh token trước khi lưu DB. Không lưu plaintext."""
+    pepper = settings.refresh_token_hash_pepper
+    return hmac.new(
+        pepper.encode("utf-8"),
+        token.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
