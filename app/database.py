@@ -241,6 +241,17 @@ def migrate_tickets_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tickets ADD COLUMN qr_value TEXT")
 
 
+def migrate_refresh_tokens_schema(conn: sqlite3.Connection) -> None:
+    """Bổ sung rotated_at cho DB cũ nếu bảng refresh_tokens đã tồn tại từ bản trước
+    (dùng để tính grace period khi phát hiện race condition lúc rotate token).
+    """
+    columns = get_table_columns(conn, "refresh_tokens")
+    if not columns:
+        return
+    if "rotated_at" not in columns:
+        conn.execute("ALTER TABLE refresh_tokens ADD COLUMN rotated_at TEXT")
+
+
 def migrate_person_logs_schema(conn: sqlite3.Connection) -> None:
     """Bổ sung cccd_image_hash để chống OCR submit trùng ảnh."""
     columns = get_table_columns(conn, "person_access_logs")
@@ -411,40 +422,43 @@ def init_db() -> None:
 
                 FOREIGN KEY (ticket_id) REFERENCES tickets(ticket_id) ON DELETE CASCADE
             );
+
             CREATE TABLE IF NOT EXISTS audit_logs (
                 audit_log_id TEXT PRIMARY KEY,
                 event_type TEXT NOT NULL CHECK (event_type IN (
-                'OCR_CCCD', 'FACE_COMPARE', 'VEHICLE_DETECTED', 'VEHICLE_LINKED',
-                'CHECK_OUT', 'TICKET_ISSUED', 'TICKET_PRINTED', 'TICKET_CHECKOUT'
-            )),
-                    session_id TEXT,
-                    event_uid TEXT,
-                    organization_id TEXT,
-                    gate_id TEXT,
-                    actor_type TEXT CHECK (actor_type IN ('CAMERA', 'GUARD', 'SYSTEM')),
-                    actor_id TEXT,
-                    result_status TEXT NOT NULL DEFAULT 'SUCCESS',
-                    detail TEXT,
-                    created_at TEXT NOT NULL
-        );
+                    'OCR_CCCD', 'FACE_COMPARE', 'VEHICLE_DETECTED', 'VEHICLE_LINKED',
+                    'CHECK_OUT', 'TICKET_ISSUED', 'TICKET_PRINTED', 'TICKET_CHECKOUT'
+                )),
+                session_id TEXT,
+                event_uid TEXT,
+                organization_id TEXT,
+                gate_id TEXT,
+                actor_type TEXT CHECK (actor_type IN ('CAMERA', 'GUARD', 'SYSTEM')),
+                actor_id TEXT,
+                result_status TEXT NOT NULL DEFAULT 'SUCCESS',
+                detail TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS refresh_tokens (
-                    refresh_token_id TEXT PRIMARY KEY,
-                    user_id          TEXT NOT NULL,
-                    token_hash       TEXT NOT NULL UNIQUE,
-                    organization_id  TEXT NOT NULL,
-                    issued_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    expires_at       TEXT NOT NULL,
-                    is_revoked       INTEGER NOT NULL DEFAULT 0,
-                    replaced_by      TEXT,
-                    created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-                );
-   
+                refresh_token_id TEXT PRIMARY KEY,
+                user_id          TEXT NOT NULL,
+                token_hash       TEXT NOT NULL UNIQUE,
+                organization_id  TEXT NOT NULL,
+                issued_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at       TEXT NOT NULL,
+                is_revoked       INTEGER NOT NULL DEFAULT 0,
+                replaced_by      TEXT,
+                rotated_at       TEXT,
+                created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
             """
         )
         migrate_access_sessions_schema(conn)
         migrate_tickets_schema(conn)
         migrate_person_logs_schema(conn)
+        migrate_refresh_tokens_schema(conn)   # noqa: gọi ĐÚNG chỗ, bên trong init_db(), có conn hợp lệ
         seed_auth_data(conn)
         conn.executescript(
             """
@@ -488,6 +502,6 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash    ON refresh_tokens(token_hash);
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires  ON refresh_tokens(expires_at);
-         """
+            """
         )
         conn.commit()

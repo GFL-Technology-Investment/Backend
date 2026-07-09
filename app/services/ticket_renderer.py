@@ -6,6 +6,7 @@ from fastapi import Request
 from PIL import Image, ImageDraw, ImageFont
 import qrcode
 from qrcode.constants import ERROR_CORRECT_M
+from requests import session
 
 try:
     import barcode
@@ -108,7 +109,164 @@ def build_ticket_qr_value(request: Request, ticket_code: str) -> str:
     """
     return str(request.base_url).rstrip("/") + f"/api/v1/tickets/verify/{ticket_code}"
 
+def render_front_ticket(
+    front_path: str,
+    qr_path: str,
+    session: Dict[str, Any],
+    person_log: Optional[Dict[str, Any]],
+    vehicle_log: Optional[Dict[str, Any]],
+    ticket_code: str,
+    fonts: dict,
+):
+    title_font = fonts["title"]
+    label_font = fonts["label"]
+    text_font = fonts["text"]
+    small_font = fonts["small"]
 
+    card_w, card_h = 640, 360
+    border = (40, 105, 190)
+
+    front = Image.new("RGB", (card_w, card_h), "white")
+    draw = ImageDraw.Draw(front)
+
+    draw.rounded_rectangle(
+        [10, 10, card_w - 10, card_h - 10],
+        radius=28,
+        outline=border,
+        width=3,
+    )
+
+    draw_centered(draw, (0, 30), card_w, "Petrol Atromex", title_font)
+
+    full_name = (
+        (person_log or {}).get("full_name")
+        or session.get("full_name")
+        or "-"
+    )
+
+    cccd = (
+        mask_cccd(
+            (person_log or {}).get("cccd_number")
+            or session.get("cccd_number")
+        )
+        or "-"
+    )
+
+    plate = (
+        (vehicle_log or {}).get("plate_number")
+        or session.get("expected_plate_number")
+        or "-"
+    )
+    checked_in_at = session.get("checked_in_at") or "-"
+
+    label_x = 230
+    value_x = 340
+
+    start_y = 135      
+    line_gap = 34
+
+    draw.text((label_x, start_y), "Tên:", font=label_font, fill="black")
+    draw.text((value_x, start_y), full_name, font=text_font, fill="black")
+
+    draw.text((label_x, start_y + line_gap), "ID:", font=label_font, fill="black")
+    draw.text((value_x, start_y + line_gap), cccd, font=text_font, fill="black")
+
+    draw.text((label_x, start_y + line_gap * 2), "Biển số:", font=label_font, fill="black")
+    draw.text((value_x, start_y + line_gap * 2), plate, font=text_font, fill="black")
+
+    draw.text((label_x, start_y + line_gap * 3), "Ngày vào:", font=label_font, fill="black")
+    draw.text((value_x, start_y + line_gap * 3), checked_in_at, font=text_font, fill="black")
+
+    # QR góc phải trên
+    qr = Image.open(qr_path).convert("RGB")
+    qr.thumbnail((90, 90))
+    front.paste(qr, (520, 35))
+
+    # Ảnh CCCD
+    face_box = [40, 90, 210, 270]
+    draw.rounded_rectangle(
+        face_box,
+        radius=12,
+        outline=(90, 90, 90),
+        width=2,
+    )
+
+    face_path = static_url_to_local_path(
+        (person_log or {}).get("cccd_face_image_url")
+        or (person_log or {}).get("live_face_image_url")
+    )
+
+    if face_path and os.path.exists(face_path):
+        face = Image.open(face_path).convert("RGB")
+        face.thumbnail((155, 155))
+
+        fx = face_box[0] + (face_box[2] - face_box[0] - face.width) // 2
+        fy = face_box[1] + (face_box[3] - face_box[1] - face.height) // 2
+
+        front.paste(face, (fx, fy))
+
+    front.save(front_path)
+    
+def render_back_ticket(
+    back_path: str,
+    barcode_path: str,
+    session: Dict[str, Any],
+    ticket_type: str,
+    fonts: dict,
+):
+    title_font = fonts["title"]
+    label_font = fonts["label"]
+    text_font = fonts["text"]
+
+    card_w, card_h = 640, 360
+    border = (40, 105, 190)
+
+    back = Image.new("RGB", (card_w, card_h), "white")
+    draw = ImageDraw.Draw(back)
+
+    draw.rounded_rectangle(
+        [10, 10, card_w - 10, card_h - 10],
+        radius=28,
+        outline=border,
+        width=3,
+    )
+
+    draw_centered(draw, (0, 30), card_w, "Petrol Atromex", title_font)
+
+    draw.text((50, 90), "Thông tin thêm", font=label_font, fill="black")
+
+    draw.text(
+        (50, 125),
+        f"Loại vé: {ticket_type}",
+        font=text_font,
+        fill="black",
+    )
+
+    draw.text(
+        (50, 160),
+        f"Phiên: {session.get('session_code') or session.get('session_id')}",
+        font=text_font,
+        fill="black",
+    )
+
+    draw.text(
+        (50, 195),
+        f"Cổng: {session.get('gate_name') or '-'}",
+        font=text_font,
+        fill="black",
+    )
+    barcode = Image.open(barcode_path).convert("RGB")
+    barcode = barcode.resize(
+    (540, 80),
+    Image.Resampling.LANCZOS,
+)
+
+    back.paste(
+        barcode,
+        (50,245),
+    )
+
+    back.save(back_path)
 def render_ticket_images(
     request: Request,
     ticket_code: str,
@@ -118,93 +276,85 @@ def render_ticket_images(
     vehicle_log: Optional[Dict[str, Any]],
     ticket_type: str,
 ) -> Dict[str, str]:
+
     os.makedirs(TICKETS_FOLDER, exist_ok=True)
 
-    front_path = os.path.join(TICKETS_FOLDER, f"{ticket_code}-front.png")
-    back_path = os.path.join(TICKETS_FOLDER, f"{ticket_code}-back.png")
-    barcode_path = os.path.join(TICKETS_FOLDER, f"{ticket_code}-barcode.png")
-    qr_path = os.path.join(TICKETS_FOLDER, f"{ticket_code}-qr.png")
+    front_path = os.path.join(
+        TICKETS_FOLDER,
+        f"{ticket_code}-front.png",
+    )
 
-    qr_value = build_ticket_qr_value(request, ticket_code)
-    generate_barcode_image(ticket_code, barcode_path)
-    generate_qr_image(qr_value, qr_path)
+    back_path = os.path.join(
+        TICKETS_FOLDER,
+        f"{ticket_code}-back.png",
+    )
 
-    title_font = load_ticket_font(24, bold=True)
-    label_font = load_ticket_font(17, bold=True)
-    text_font = load_ticket_font(17)
-    small_font = load_ticket_font(13)
+    barcode_path = os.path.join(
+        TICKETS_FOLDER,
+        f"{ticket_code}-barcode.png",
+    )
 
-    card_w, card_h = 640, 360
-    border = (40, 105, 190)
-    header = "Petrol Atromex"
-    full_name = (person_log or {}).get("full_name") or session.get("full_name") or "-"
-    cccd_mask = mask_cccd((person_log or {}).get("cccd_number") or session.get("cccd_number")) or "-"
-    plate = (vehicle_log or {}).get("plate_number") or session.get("expected_plate_number") or "-"
-    checked_in_at = session.get("checked_in_at") or "-"
-    checked_out_at = session.get("checked_out_at") or "-"
+    qr_path = os.path.join(
+        TICKETS_FOLDER,
+        f"{ticket_code}-qr.png",
+    )
 
-    # Mặt trước
-    front = Image.new("RGB", (card_w, card_h), "white")
-    draw = ImageDraw.Draw(front)
-    draw.rounded_rectangle([10, 10, card_w - 10, card_h - 10], radius=28, outline=border, width=3)
-    draw_centered(draw, (0, 30), card_w, header, title_font)
-    draw.text((50, 95), "Tên:", font=label_font, fill="black")
-    draw.text((140, 95), full_name, font=text_font, fill="black")
-    draw.text((50, 135), "ID:", font=label_font, fill="black")
-    draw.text((140, 135), cccd_mask, font=text_font, fill="black")
-    draw.text((50, 175), "Biển số:", font=label_font, fill="black")
-    draw.text((140, 175), plate, font=text_font, fill="black")
-    draw.text((50, 215), "Ngày vào:", font=label_font, fill="black")
-    draw.text((170, 215), checked_in_at, font=text_font, fill="black")
-    draw.text((50, 255), "Ngày ra:", font=label_font, fill="black")
-    draw.text((170, 255), checked_out_at, font=text_font, fill="black")
-    draw.text((50, 305), f"Mã vé: {ticket_code}", font=small_font, fill=(70, 70, 70))
+    qr_value = build_ticket_qr_value(
+        request,
+        ticket_code,
+    )
 
-    face_local_path = static_url_to_local_path((person_log or {}).get("cccd_face_image_url") or (person_log or {}).get("live_face_image_url"))
-    face_box = [440, 105, 575, 240]
-    draw.rounded_rectangle(face_box, radius=14, outline=(90, 90, 90), width=3)
-    if face_local_path and os.path.exists(face_local_path):
-        try:
-            face = Image.open(face_local_path).convert("RGB")
-            face.thumbnail((face_box[2] - face_box[0] - 10, face_box[3] - face_box[1] - 10))
-            fx = face_box[0] + ((face_box[2] - face_box[0]) - face.width) // 2
-            fy = face_box[1] + ((face_box[3] - face_box[1]) - face.height) // 2
-            front.paste(face, (fx, fy))
-        except Exception:
-            draw.text((455, 160), "FACE", font=label_font, fill=(90, 90, 90))
-    else:
-        draw.text((455, 160), "FACE", font=label_font, fill=(90, 90, 90))
-    front.save(front_path)
+    generate_qr_image(
+        qr_value,
+        qr_path,
+    )
 
-    # Mặt sau
-    back = Image.new("RGB", (card_w, card_h), "white")
-    draw = ImageDraw.Draw(back)
-    draw.rounded_rectangle([10, 10, card_w - 10, card_h - 10], radius=28, outline=border, width=3)
-    draw_centered(draw, (0, 30), card_w, header, title_font)
-    draw.text((50, 90), "Thông tin thêm", font=label_font, fill="black")
-    draw.text((50, 125), f"Loại vé: {ticket_type}", font=text_font, fill="black")
-    draw.text((50, 160), f"Phiên: {session.get('session_code') or session.get('session_id')}", font=text_font, fill="black")
-    draw.text((50, 195), f"Cổng: {session.get('gate_name') or '-'}", font=text_font, fill="black")
+    generate_barcode_image(
+        ticket_code,
+        barcode_path,
+    )
 
-    barcode_img = Image.open(barcode_path).convert("RGB")
-    barcode_img.thumbnail((380, 85))
-    back.paste(barcode_img, (55, 245))
+    fonts = {
+        "title": load_ticket_font(24, True),
+        "label": load_ticket_font(17, True),
+        "text": load_ticket_font(17),
+        "small": load_ticket_font(13),
+    }
 
-    qr_img = Image.open(qr_path).convert("RGB")
-    qr_size = 150
-    qr_img.thumbnail((qr_size, qr_size))
-    right_section_x = 420
-    right_section_w = card_w - right_section_x - 20
-    qr_x = right_section_x + (right_section_w - qr_img.width) // 2
-    qr_y = (card_h - qr_img.height) // 2
-    back.paste(qr_img, (qr_x, qr_y))
+    render_front_ticket(
+        front_path=front_path,
+        qr_path=qr_path,
+        session=session,
+        person_log=person_log,
+        vehicle_log=vehicle_log,
+        ticket_code=ticket_code,
+        fonts=fonts,
+    )
 
-    back.save(back_path)
+    render_back_ticket(
+        back_path=back_path,
+        barcode_path=barcode_path,
+        session=session,
+        ticket_type=ticket_type,
+        fonts=fonts,
+    )
 
     return {
-        "front_image_url": absolute_url(request, to_static_url(front_path)),
-        "back_image_url": absolute_url(request, to_static_url(back_path)),
-        "barcode_image_url": absolute_url(request, to_static_url(barcode_path)),
-        "qr_image_url": absolute_url(request, to_static_url(qr_path)),
+        "front_image_url": absolute_url(
+            request,
+            to_static_url(front_path),
+        ),
+        "back_image_url": absolute_url(
+            request,
+            to_static_url(back_path),
+        ),
+        "barcode_image_url": absolute_url(
+            request,
+            to_static_url(barcode_path),
+        ),
+        "qr_image_url": absolute_url(
+            request,
+            to_static_url(qr_path),
+        ),
         "qr_value": qr_value,
     }

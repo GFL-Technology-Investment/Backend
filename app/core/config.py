@@ -86,10 +86,10 @@ class Settings:
     internal_jwt_secret: str = os.getenv("INTERNAL_JWT_SECRET", "dev-internal-jwt-secret-change-me")
     internal_jwt_issuer: str = os.getenv("INTERNAL_JWT_ISSUER", "gfl-core")
     internal_jwt_audience: str = os.getenv("INTERNAL_JWT_AUDIENCE", "gfl-internal-api")
-    internal_jwt_expire_seconds: int = _env_int("INTERNAL_JWT_EXPIRE_SECONDS", 60 * 15)        # ← đổi 8h → 15 phút
+    internal_jwt_expire_seconds: int = _env_int("INTERNAL_JWT_EXPIRE_SECONDS", 10)        # ← đổi 8h → 15 phút
     refresh_token_expire_seconds: int = _env_int("REFRESH_TOKEN_EXPIRE_SECONDS", 60 * 60 * 24 * 7)  # ← thêm: 7 ngày
     refresh_token_hash_pepper: str = os.getenv("REFRESH_TOKEN_HASH_PEPPER", "dev-refresh-token-pepper-change-me")  # ← thêm
-
+    refresh_token_rotation_grace_seconds: int = _env_int("REFRESH_TOKEN_ROTATION_GRACE_SECONDS", 10)
 settings = Settings()
 
 

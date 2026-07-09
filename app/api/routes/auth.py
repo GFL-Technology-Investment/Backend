@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+import logging
+logger = logging.getLogger(__name__)
 import json
 import secrets
 import sqlite3
@@ -163,85 +164,144 @@ async def refresh_access_token(
     refresh_token: str = Form(..., description="Refresh token nhận được khi login"),
     db: sqlite3.Connection = Depends(get_db),
 ):
-    """Đổi refresh token lấy access token mới + refresh token mới (rotation)."""
-    token_hash = hash_refresh_token(refresh_token)
-    row = db.execute(
-        "SELECT * FROM refresh_tokens WHERE token_hash = ?", (token_hash,)
-    ).fetchone()
+    max_hops = 3  # giới hạn số lần "đuổi theo" chuỗi rotation, tránh vòng lặp bất tận
+    current_hash = hash_refresh_token(refresh_token)
 
-    if not row:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"status": "INVALID_REFRESH_TOKEN", "message": "Refresh token không hợp lệ"},
+    for _hop in range(max_hops):
+        new_refresh_id = str(uuid.uuid4())
+
+        # Atomic claim: chỉ 1 request duy nhất có thể update thành công dòng này
+        claim = db.execute(
+            """
+            UPDATE refresh_tokens
+            SET replaced_by = ?, rotated_at = datetime('now')
+            WHERE token_hash = ?
+              AND is_revoked = 0
+              AND replaced_by IS NULL
+              AND expires_at > datetime('now')
+            """,
+            (new_refresh_id, current_hash),
         )
 
-    if int(row["is_revoked"] or 0) == 1:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"status": "REFRESH_TOKEN_REVOKED", "message": "Refresh token đã bị thu hồi"},
-        )
+        if claim.rowcount == 1:
+            # Thắng race — chỉ request này được phép rotate token
+            row = db.execute(
+                "SELECT * FROM refresh_tokens WHERE token_hash = ?", (current_hash,)
+            ).fetchone()
 
-    # Phát hiện reuse: token cũ đã được rotate nhưng vẫn bị dùng lại
-    # → dấu hiệu token bị đánh cắp → revoke toàn bộ session của user
-    if row["replaced_by"] is not None:
-        db.execute(
-            "UPDATE refresh_tokens SET is_revoked = 1 WHERE user_id = ?",
-            (row["user_id"],),
-        )
-        db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={
-                "status": "REFRESH_TOKEN_REUSE_DETECTED",
-                "message": "Phát hiện tái sử dụng refresh token. Toàn bộ phiên đã bị thu hồi.",
-            },
-        )
+            user_row = db.execute(
+                "SELECT * FROM users WHERE user_id = ? AND is_active = 1", (row["user_id"],)
+            ).fetchone()
+            if not user_row:
+                db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail={"status": "USER_INACTIVE", "message": "Tài khoản không tồn tại hoặc đã bị khóa"},
+                )
 
-    # Check hết hạn qua SQLite để nhất quán với cách lưu ISO string
-    expired = db.execute(
-        "SELECT CASE WHEN ? < datetime('now') THEN 1 ELSE 0 END AS expired",
-        (row["expires_at"],),
-    ).fetchone()["expired"]
+            new_raw = generate_refresh_token()
+            now_sql = db.execute("SELECT datetime('now') AS n").fetchone()["n"]
+            expires_sql = db.execute(
+                "SELECT datetime('now', ?) AS e",
+                (f"+{settings.refresh_token_expire_seconds} seconds",),
+            ).fetchone()["e"]
 
-    if expired:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"status": "REFRESH_TOKEN_EXPIRED", "message": "Refresh token đã hết hạn, vui lòng đăng nhập lại"},
-        )
+            db.execute(
+                """
+                INSERT INTO refresh_tokens
+                    (refresh_token_id, user_id, token_hash, organization_id, issued_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (new_refresh_id, row["user_id"], hash_refresh_token(new_raw),
+                 row["organization_id"], now_sql, expires_sql),
+            )
+            db.commit()
 
-    # Check user vẫn còn active
-    user_row = db.execute(
-        "SELECT * FROM users WHERE user_id = ? AND is_active = 1", (row["user_id"],)
-    ).fetchone()
-    if not user_row:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"status": "USER_INACTIVE", "message": "Tài khoản không tồn tại hoặc đã bị khóa"},
-        )
+            roles = json.loads(user_row["roles"] or "[]")
+            permissions = json.loads(user_row["permissions"] or "[]")
 
-    # Rotation: tạo refresh token mới, đánh dấu token cũ đã được thay thế
-    new_refresh_raw = _issue_refresh_token(db, row["user_id"], row["organization_id"])
-    new_hash = hash_refresh_token(new_refresh_raw)
-    new_row = db.execute(
-        "SELECT refresh_token_id FROM refresh_tokens WHERE token_hash = ?", (new_hash,)
-    ).fetchone()
+            return _build_token_response(
+                user_id=user_row["user_id"],
+                email=user_row["email"],
+                org_id=row["organization_id"],
+                roles=roles,
+                permissions=permissions,
+                refresh_token_raw=new_raw,
+            )
 
-    db.execute(
-        "UPDATE refresh_tokens SET replaced_by = ? WHERE refresh_token_id = ?",
-        (new_row["refresh_token_id"], row["refresh_token_id"]),
-    )
-    db.commit()
+        # Thua race — xem lý do chính xác để quyết định bước tiếp theo
+        row = db.execute(
+            "SELECT * FROM refresh_tokens WHERE token_hash = ?", (current_hash,)
+        ).fetchone()
 
-    roles = json.loads(user_row["roles"] or "[]")
-    permissions = json.loads(user_row["permissions"] or "[]")
+        if not row:
+            logger.warning("refresh_token not found in DB, hash=%s...", current_hash[:12])
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"status": "INVALID_REFRESH_TOKEN", "message": "Refresh token không hợp lệ"},
+            )
 
-    return _build_token_response(
-        user_id=user_row["user_id"],
-        email=user_row["email"],
-        org_id=row["organization_id"],
-        roles=roles,
-        permissions=permissions,
-        refresh_token_raw=new_refresh_raw,
+        if int(row["is_revoked"] or 0) == 1:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"status": "REFRESH_TOKEN_REVOKED", "message": "Refresh token đã bị thu hồi"},
+            )
+
+        expired = db.execute(
+            "SELECT CASE WHEN ? <= datetime('now') THEN 1 ELSE 0 END AS expired",
+            (row["expires_at"],),
+        ).fetchone()["expired"]
+        if expired:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"status": "REFRESH_TOKEN_EXPIRED", "message": "Refresh token đã hết hạn, vui lòng đăng nhập lại"},
+            )
+
+        if row["replaced_by"] is not None:
+            # Token đã bị rotate — kiểm tra có phải race condition gần đây không
+            within_grace = db.execute(
+                """
+                SELECT CASE
+                    WHEN ? IS NULL THEN 0
+                    WHEN (julianday('now') - julianday(?)) * 86400 <= ? THEN 1
+                    ELSE 0
+                END AS within_grace
+                """,
+                (row["rotated_at"], row["rotated_at"], settings.refresh_token_rotation_grace_seconds),
+            ).fetchone()["within_grace"]
+
+            if within_grace:
+                # Race condition hợp lệ — "đuổi theo" chuỗi rotation, thử lại với token kế tiếp
+                successor = db.execute(
+                    "SELECT token_hash FROM refresh_tokens WHERE refresh_token_id = ?",
+                    (row["replaced_by"],),
+                ).fetchone()
+                if successor:
+                    logger.info(
+                        "refresh race condition detected (within grace), chaining to successor"
+                    )
+                    current_hash = successor["token_hash"]
+                    continue  # thử claim lại với token kế tiếp trong chuỗi
+
+            # Ngoài grace period → coi là reuse thật sự, revoke toàn bộ
+            db.execute(
+                "UPDATE refresh_tokens SET is_revoked = 1 WHERE user_id = ?",
+                (row["user_id"],),
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "status": "REFRESH_TOKEN_REUSE_DETECTED",
+                    "message": "Phát hiện tái sử dụng refresh token. Toàn bộ phiên đã bị thu hồi.",
+                },
+            )
+        continue
+
+    # Hết số lần thử cho phép
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"status": "REFRESH_CONFLICT", "message": "Quá nhiều request refresh đồng thời, vui lòng thử lại"},
     )
 
 
@@ -297,10 +357,6 @@ async def get_dev_camera_token():
         },
     }
 
-
-# ---------------------------------------------------------------------------
-# Azure AD exchange (giữ nguyên logic cũ, chỉ thêm refresh token)
-# ---------------------------------------------------------------------------
 
 class AzureExchangeRequest(BaseModel):
     id_token: str
