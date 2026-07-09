@@ -24,10 +24,6 @@ from app.database import get_db
 router = APIRouter(prefix="/api/v1/auth")
 
 
-# ---------------------------------------------------------------------------
-# Dev users (chỉ dùng khi AUTH_DEV_MODE=true)
-# ---------------------------------------------------------------------------
-
 class DevLoginRequest(BaseModel):
     username: str
     password: str
@@ -62,10 +58,6 @@ DEV_USERS = {
     },
 }
 
-
-# ---------------------------------------------------------------------------
-# Helper nội bộ
-# ---------------------------------------------------------------------------
 
 def _issue_refresh_token(
     db: sqlite3.Connection,
@@ -134,16 +126,11 @@ def _build_token_response(
     return resp
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-
 @router.post("/dev-login")
 async def dev_login(
     payload: DevLoginRequest,
     db: sqlite3.Connection = Depends(get_db),
 ):
-    """Cấp access token + refresh token để test khi chưa nối Azure AD thật."""
     if not settings.auth_dev_mode:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

@@ -66,7 +66,6 @@ class Settings:
     dev_camera_name: str = os.getenv("DEV_CAMERA_NAME", "Camera cổng vào 01")
 
     # Azure AD fields để tích hợp thật ở giai đoạn sau.
-    # Hiện tại PoC dùng dev-login để test internal JWT trước.
     azure_tenant_id: str = os.getenv("AZURE_TENANT_ID", "")
     azure_client_id: str = os.getenv("AZURE_CLIENT_ID", "")
     azure_issuer: str = os.getenv("AZURE_ISSUER", "")
