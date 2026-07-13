@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import uuid
 from typing import AsyncIterator, Optional, Dict, Any, List
 
 from app.core.config import settings
@@ -240,6 +241,24 @@ def migrate_tickets_schema(conn: sqlite3.Connection) -> None:
     if "qr_value" not in columns:
         conn.execute("ALTER TABLE tickets ADD COLUMN qr_value TEXT")
 
+def migrate_user_identity_providers(conn: sqlite3.Connection) -> None:
+    columns = get_table_columns(conn, "users")
+    if not columns or "azure_user_id" not in columns:
+        return
+
+    rows = conn.execute(
+        "SELECT user_id, email, azure_user_id FROM users WHERE azure_user_id IS NOT NULL AND azure_user_id != ''"
+    ).fetchall()
+
+    for row in rows:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO user_identity_providers
+                (identity_id, user_id, provider, provider_sub, email_at_link)
+            VALUES (?, ?, 'keycloak', ?, ?)
+            """,
+            (str(uuid.uuid4()), row["user_id"], row["azure_user_id"], row["email"]),
+        )
 
 def migrate_refresh_tokens_schema(conn: sqlite3.Connection) -> None:
     """Bổ sung rotated_at cho DB cũ nếu bảng refresh_tokens đã tồn tại từ bản trước
@@ -453,12 +472,25 @@ def init_db() -> None:
                 created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS user_identity_providers (
+                identity_id      TEXT PRIMARY KEY,
+                user_id          TEXT NOT NULL,
+                provider         TEXT NOT NULL CHECK (provider IN ('keycloak', 'azure')),
+                provider_sub     TEXT NOT NULL,
+                email_at_link    TEXT,
+                linked_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+                UNIQUE (provider, provider_sub),
+                UNIQUE (user_id, provider),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
             """
         )
         migrate_access_sessions_schema(conn)
         migrate_tickets_schema(conn)
         migrate_person_logs_schema(conn)
-        migrate_refresh_tokens_schema(conn)   # noqa: gọi ĐÚNG chỗ, bên trong init_db(), có conn hợp lệ
+        migrate_refresh_tokens_schema(conn)   
+        migrate_user_identity_providers(conn)
         seed_auth_data(conn)
         conn.executescript(
             """
@@ -502,6 +534,7 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash    ON refresh_tokens(token_hash);
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires  ON refresh_tokens(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_user_identity_providers_user_id ON user_identity_providers(user_id);
             """
         )
         conn.commit()

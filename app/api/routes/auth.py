@@ -1,11 +1,12 @@
 from __future__ import annotations
 import logging
+
 logger = logging.getLogger(__name__)
 import json
 import secrets
 import sqlite3
 import uuid
-from typing import Optional
+from typing import Optional, Literal
 
 from fastapi import APIRouter, Depends, Form, HTTPException, status
 from pydantic import BaseModel
@@ -307,6 +308,7 @@ async def refresh_access_token(
 
 @router.post("/logout")
 async def logout(
+    provider: Optional[str] = Form(None, description="Provider đã dùng để login (keycloak/azure). Bỏ trống nếu login bằng dev-login."),
     refresh_token: Optional[str] = Form(None, description="Refresh token cần thu hồi"),
     auth: InternalAuthContext = Depends(require_internal_auth),
     db: sqlite3.Connection = Depends(get_db),
@@ -320,12 +322,20 @@ async def logout(
         )
         db.commit()
 
-    logout_url = (
-        f"{settings.azure_issuer}/protocol/openid-connect/logout"
-        f"?post_logout_redirect_uri={settings.frontend_url}/login"
-        if settings.azure_issuer
-        else None
-    )
+    logout_url = None
+    if provider:
+        try:
+            discovery = await oidc.get_discovery(provider)
+            end_session_endpoint = discovery.get("end_session_endpoint")
+            if end_session_endpoint:
+                logout_url = f"{end_session_endpoint}?post_logout_redirect_uri={settings.frontend_url}/login"
+        except Exception as exc:
+            logger.warning("Không lấy được end_session_endpoint cho provider=%s: %s", provider, exc)
+            # Không raise — đăng xuất khỏi hệ thống nội bộ (refresh token đã
+            # thu hồi ở trên) vẫn phải thành công dù không lấy được logout_url
+            # của IdP. Giống nguyên tắc audit log: phần phụ trợ lỗi không
+            # được phá luồng chính.
+
     return {
         "status": "SUCCESS",
         "message": "Đã đăng xuất thành công",
@@ -359,6 +369,7 @@ async def get_dev_camera_token():
 
 
 class AzureExchangeRequest(BaseModel):
+    provider: Literal["keycloak", "azure"]
     id_token: str
     access_token: str
     org_id: Optional[str] = None
@@ -370,62 +381,90 @@ async def azure_exchange(
     db: sqlite3.Connection = Depends(get_db),
 ):
     claims = await oidc.verify_oidc_tokens(
+        provider=payload.provider,
         id_token=payload.id_token,
         access_token=payload.access_token,
     )
 
-    azure_user_id = str(claims.get("sub") or "")
+    provider_sub = str(claims.get("sub") or "")
     email = claims.get("email") or claims.get("preferred_username")
 
-    if not azure_user_id or not email:
+    if not provider_sub or not email:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"status": "AUTH_INVALID_TOKEN", "message": "Token thiếu sub hoặc email"},
         )
 
-    roles = oidc.extract_list_claim(claims, settings.azure_roles_claim) or ["guard"]
-    permissions = oidc.extract_list_claim(claims, settings.azure_permissions_claim)
+    provider_config = oidc.get_provider_config(payload.provider)
+    roles = oidc.extract_list_claim(claims, provider_config["roles_claim"]) or ["guard"]
+    permissions = oidc.extract_list_claim(claims, provider_config["permissions_claim"])
     org_id = (
         payload.org_id
-        or oidc.get_claim(claims, settings.azure_org_claim)
+        or oidc.get_claim(claims, provider_config["org_claim"])
         or settings.default_organization_id
     )
 
-    user_row = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    # BƯỚC 1 — provider + provider_sub này đã từng liên kết với user nào chưa?
+    identity_row = db.execute(
+        "SELECT user_id FROM user_identity_providers WHERE provider = ? AND provider_sub = ?",
+        (payload.provider, provider_sub),
+    ).fetchone()
 
-    if user_row is None:
-        user_id = f"azure-{secrets.token_hex(8)}"
+    if identity_row:
+        # Đã liên kết trước đó -> dùng ĐÚNG user_id đã gắn, KHÔNG tra lại theo
+        # email (an toàn hơn: email đổi ở IdP vẫn nhận đúng user cũ, không vô
+        # tình tạo user trùng).
+        user_row = db.execute(
+            "SELECT * FROM users WHERE user_id = ?", (identity_row["user_id"],)
+        ).fetchone()
+        if not user_row:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"status": "AUTH_INVALID_TOKEN", "message": "Liên kết định danh không hợp lệ"},
+            )
+    else:
+        # BƯỚC 2 — chưa liên kết provider NÀY, thử tìm user theo email (trường
+        # hợp: user đã tồn tại từ trước, đây là lần đầu họ login bằng provider mới)
+        user_row = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+
+        if user_row is None:
+            # BƯỚC 3 — chưa có user nào khớp -> JIT provisioning, tạo mới
+            user_id = f"{payload.provider}-{secrets.token_hex(8)}"
+            db.execute(
+                """
+                INSERT INTO users (user_id, email, full_name, organization_id, roles, permissions, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                """,
+                (user_id, email, claims.get("name", ""), org_id, json.dumps(roles), json.dumps(permissions)),
+            )
+            user_row = db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+
+        # Gắn liên kết provider <-> user (dù user vừa tạo mới hay đã có sẵn)
         db.execute(
             """
-            INSERT INTO users (user_id, email, full_name, organization_id, roles, permissions, azure_user_id, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+            INSERT INTO user_identity_providers (identity_id, user_id, provider, provider_sub, email_at_link)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (user_id, email, claims.get("name", ""), org_id,
-             json.dumps(roles), json.dumps(permissions), azure_user_id),
+            (str(uuid.uuid4()), user_row["user_id"], payload.provider, provider_sub, email),
         )
-    else:
-        if not int(user_row["is_active"] or 0):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"status": "USER_INACTIVE", "message": "Tài khoản đã bị khóa"},
-            )
-        user_id = user_row["user_id"]
-        org_id = user_row["organization_id"]
-        roles = json.loads(user_row["roles"] or "[]")
-        permissions = json.loads(user_row["permissions"] or "[]")
 
-        if not user_row["azure_user_id"]:
-            db.execute(
-                "UPDATE users SET azure_user_id = ? WHERE user_id = ?",
-                (azure_user_id, user_id),
-            )
+    if not int(user_row["is_active"] or 0):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"status": "USER_INACTIVE", "message": "Tài khoản đã bị khóa"},
+        )
+
+    user_id = user_row["user_id"]
+    org_id = user_row["organization_id"]
+    roles = json.loads(user_row["roles"] or "[]")
+    permissions = json.loads(user_row["permissions"] or "[]")
 
     refresh_raw = _issue_refresh_token(db, user_id, org_id)
     db.commit()
 
     return _build_token_response(
         user_id=user_id,
-        email=email,
+        email=user_row["email"],
         org_id=org_id,
         roles=roles,
         permissions=permissions,
