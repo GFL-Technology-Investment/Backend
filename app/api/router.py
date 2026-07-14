@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from app.api.deps.auth import require_camera_auth, require_internal_auth
-from app.api.routes import access, aibox_mock, auth, face, health, history, ocr, tickets
+from app.api.routes import access, aibox_mock, auth, face, health, history, ocr, tickets, user
 
 api_router = APIRouter()
 
@@ -18,3 +18,6 @@ api_router.include_router(history.router, tags=["history"], dependencies=[Depend
 
 # Camera APIs: dành cho Camera/AIBox/service
 api_router.include_router(aibox_mock.router, tags=["mock-aibox"], dependencies=[Depends(require_camera_auth)])
+
+# User APIs: dành cho FE/user nội bộ
+api_router.include_router(user.router, tags=["user"], dependencies=[Depends(require_internal_auth)])
