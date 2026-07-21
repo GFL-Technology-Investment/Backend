@@ -40,11 +40,8 @@ DEV_USERS = {
         "password": "123456",
         "email": "guard@company.com",
         "org_id": "org-001",
-        "roles": ["guard"],
-        "permissions": [ "ticket.issue",
-        "vehicle.approve",
-        "ticket.print",
-        "camera.view"],
+        "roles": ["Admin"],
+        "permissions": ["*"],
         "camera": {
             "camera_id": "camera-dev-001",
             "camera_token": settings.dev_camera_token,
@@ -52,14 +49,6 @@ DEV_USERS = {
             "location_id": "loc-001",
             "gate_id": "gate-001",
         },
-    },
-    "admin@example.com": {
-        "user_id": "user-dev-002",
-        "password": "123456",
-        "email": "admin@example.com",
-        "org_id": "org-001",
-        "roles": ["admin"],
-        "permissions": ["*"],
     },
 }
 
