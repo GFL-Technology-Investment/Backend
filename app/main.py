@@ -7,8 +7,6 @@ from fastapi.staticfiles import StaticFiles
 from app.api.router import api_router
 from app.core.config import settings, ensure_runtime_folders
 from app.database import init_db
-
-
 def create_app() -> FastAPI:
     ensure_runtime_folders()
 

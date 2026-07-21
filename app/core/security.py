@@ -1,9 +1,3 @@
-"""Security helpers dùng cho Auth nội bộ và Auth Camera.
-
-Không thêm dependency ngoài: JWT nội bộ được ký HS256 bằng stdlib hmac/hashlib.
-Phần Azure AD thật sẽ verify JWT bằng JWKS ở giai đoạn tích hợp Azure thật.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -12,6 +6,8 @@ import hmac
 import json
 import secrets
 import time
+import bcrypt
+
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, status
@@ -148,3 +144,13 @@ def hash_refresh_token(token: str) -> str:
         token.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False

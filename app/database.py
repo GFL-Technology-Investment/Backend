@@ -161,7 +161,7 @@ _PERMISSION_SEED = [
 ]
 
 _ROLE_PERMISSION_SEED = {
-    "SUPER_ADMIN": ["*"],
+    "ADMIN": ["*"],
     "MANAGER": [
         "camera.view", "camera.manage", "ticket.issue", "ticket.print",
         "vehicle.approve", "report.export",
@@ -311,6 +311,12 @@ def migrate_person_logs_schema(conn: sqlite3.Connection) -> None:
     if columns and "cccd_image_hash" not in columns:
         conn.execute("ALTER TABLE person_access_logs ADD COLUMN cccd_image_hash TEXT")
 
+def migrate_users_password_hash(conn: sqlite3.Connection) -> None:
+    columns = get_table_columns(conn, "users")
+    if not columns:
+        return
+    if "password_hash" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
 
 def migrate_legacy_user_roles(conn: sqlite3.Connection) -> None:
     """Chuyển users.roles (JSON cũ) sang bảng user_roles chuẩn hóa."""
@@ -581,17 +587,15 @@ def init_db() -> None:
             """
         )
 
-        # Chạy các hàm Migration
         migrate_access_sessions_schema(conn)
         migrate_tickets_schema(conn)
         migrate_person_logs_schema(conn)
-        migrate_refresh_tokens_schema(conn)   
-        migrate_user_identity_providers(conn)
-        migrate_legacy_user_roles(conn)
-
-        # Chạy các hàm Seed
-        seed_rbac_data(conn)
-        seed_auth_data(conn)
+        migrate_users_password_hash(conn)
+        migrate_refresh_tokens_schema(conn)
+        seed_rbac_data(conn)                    
+        seed_auth_data(conn)                    
+        migrate_user_identity_providers(conn)   
+        migrate_legacy_user_roles(conn)         
 
         # Tạo Index
         conn.executescript(
