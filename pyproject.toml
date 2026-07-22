@@ -27,6 +27,8 @@ dependencies = [
     "insightface>=0.7.3",
     "python-barcode>=0.15.1",
     "redis>=8.0.1",
+    "python-jose[cryptography]>=3.3.0",
+    "python-dotenv>=1.0.1",
 ]
 
 [tool.uv]

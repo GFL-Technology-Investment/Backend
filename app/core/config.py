@@ -6,9 +6,11 @@ File này chứa path/runtime settings và auth settings để tránh hard-code 
 from __future__ import annotations
 
 import os
+from dotenv import load_dotenv
 from dataclasses import dataclass
 
 
+load_dotenv()  # đọc .env trước khi đọc các biến môi trường khác    
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -62,6 +64,10 @@ class Settings:
     dev_camera_client_id: str = os.getenv("DEV_CAMERA_CLIENT_ID", "cam-client-001")
     dev_camera_code: str = os.getenv("DEV_CAMERA_CODE", "cam-gate-01")
     dev_camera_name: str = os.getenv("DEV_CAMERA_NAME", "Camera cổng vào 01")
+
+    # Redis cache
+    redis_url: str = os.getenv("REDIS_URL", "")
+    redis_enabled: bool = _env_bool("REDIS_ENABLED", False)
 
     # Azure AD fields để tích hợp thật ở giai đoạn sau.
     # Hiện tại PoC dùng dev-login để test internal JWT trước.
