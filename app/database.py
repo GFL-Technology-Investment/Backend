@@ -158,6 +158,9 @@ _PERMISSION_SEED = [
     ("system.user.delete", "Xóa user", "system"),
     ("role.assign", "Gán role", "system"),
     ("permission.assign", "Gán permission", "system"),
+    ("system.org.create", "Tạo tổ chức", "system"),
+    ("system.org.update", "Sửa tổ chức", "system"),
+    ("system.org.delete", "Khóa tổ chức", "system"),
 ]
 
 _ROLE_PERMISSION_SEED = {
@@ -166,7 +169,7 @@ _ROLE_PERMISSION_SEED = {
         "camera.view", "camera.manage", "ticket.issue", "ticket.print",
         "vehicle.approve", "report.export",
         "system.user.create", "system.user.update", "system.user.delete",
-        "role.assign",
+        "role.assign", "system.org.create", "system.org.update", "system.org.delete",
     ],
 
     "GUARD": ["camera.view", "ticket.issue", "ticket.print","vehicle.approve"],

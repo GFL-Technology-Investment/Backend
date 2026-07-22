@@ -119,7 +119,8 @@ def _build_token_response(
         resp.update(extra)
     return resp
 
-
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
 @router.post("/dev-login")
 async def dev_login(payload: DevLoginRequest, db: sqlite3.Connection = Depends(get_db)):
     if not settings.auth_dev_mode:
@@ -127,8 +128,9 @@ async def dev_login(payload: DevLoginRequest, db: sqlite3.Connection = Depends(g
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"status": AUTH_DEV_MODE_DISABLED, "message": "AUTH_DEV_MODE=false"},
         )
-
-    user = DEV_USERS.get(payload.username)
+    email = normalize_email(payload.username)
+    print("username =", email)
+    user = DEV_USERS.get(email)
 
     if user:
         # Giữ nguyên hành vi cũ cho 2 tài khoản hard-code — KHÔNG đổi gì
@@ -154,12 +156,10 @@ async def dev_login(payload: DevLoginRequest, db: sqlite3.Connection = Depends(g
                 "camera_api": "Authorization: Bearer <camera.camera_token>",
             },
         }
-
-    # MỚI — user thật tạo qua API quản trị, đăng nhập bằng email + mật khẩu
     user_row = db.execute(
-        "SELECT * FROM users WHERE email = ? AND is_active = 1", (payload.username,)
+        "SELECT * FROM users WHERE email = ? AND is_active = 1", (email,)
     ).fetchone()
-
+    print(user_row)
     if not user_row or not user_row["password_hash"] or not verify_password(payload.password, user_row["password_hash"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -403,7 +403,7 @@ async def azure_exchange(
     )
 
     provider_sub = str(claims.get("sub") or "")
-    email = claims.get("email") or claims.get("preferred_username")
+    email = claims.get("email") or claims.get("preferred_username").strip().lower() 
 
     if not provider_sub or not email:
         raise HTTPException(

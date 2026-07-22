@@ -78,8 +78,8 @@ async def create_user(
     ).fetchone()
     if not org_row:
         raise HTTPException(status_code=400, detail={"status": "ORG_NOT_FOUND", "message": "Tổ chức không tồn tại hoặc đã bị khóa"})
-
-    existing = db.execute("SELECT user_id FROM users WHERE email = ?", (payload.email,)).fetchone()
+    normalized_email = payload.email.strip().lower()
+    existing = db.execute("SELECT user_id FROM users WHERE email = ?", (normalized_email,)).fetchone()
     if existing:
         raise HTTPException(status_code=409, detail={"status": "EMAIL_ALREADY_EXISTS", "message": "Email đã được sử dụng"})
 
@@ -96,7 +96,7 @@ async def create_user(
         INSERT INTO users (user_id, email, full_name, organization_id, password_hash, roles, permissions, is_active)
         VALUES (?, ?, ?, ?, ?, '[]', '[]', 1)
         """,
-        (user_id, payload.email, payload.full_name, payload.organization_id, hash_password(payload.password)),
+        (user_id, normalized_email, payload.full_name, payload.organization_id, hash_password(payload.password)),
     )
 
     for role_row in role_rows:
@@ -220,3 +220,37 @@ async def list_permissions(
 ):
     rows = db.execute("SELECT permission_id, permission_code, permission_name, module_name FROM permissions ORDER BY module_name, permission_code").fetchall()
     return {"permissions": [dict(r) for r in rows]}
+
+class UpdatePermissionRequest(BaseModel):
+    permission_name: Optional[str] = None
+    description: Optional[str] = None
+
+
+@router.patch("/api/v1/permissions/{permission_id}")
+async def update_permission(
+    permission_id: str,
+    payload: UpdatePermissionRequest,
+    db: sqlite3.Connection = Depends(get_db),
+    _auth=Depends(require_permission("permission.assign")),
+):
+    """Chỉ sửa mô tả/tên hiển thị — KHÔNG cho đổi permission_code (đó là
+    string được hard-code trong Depends(require_permission("...")) ở khắp
+    routes, đổi giữa chừng sẽ làm mọi check quyền hiện có bị lệch ngay lập
+    tức). Cũng không có API tạo/xóa permission — xem giải thích đầu câu trả lời."""
+    row = db.execute("SELECT * FROM permissions WHERE permission_id = ?", (permission_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Permission not found")
+
+    updates, params = [], []
+    if payload.permission_name is not None:
+        updates.append("permission_name = ?"); params.append(payload.permission_name)
+    if payload.description is not None:
+        updates.append("description = ?"); params.append(payload.description)
+
+    if updates:
+        params.append(permission_id)
+        db.execute(f"UPDATE permissions SET {', '.join(updates)} WHERE permission_id = ?", params)
+        db.commit()
+
+    row = db.execute("SELECT * FROM permissions WHERE permission_id = ?", (permission_id,)).fetchone()
+    return dict(row)
