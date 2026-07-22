@@ -135,8 +135,6 @@ async def update_organization(
                 "message": "Không có dữ liệu cần cập nhật",
             },
         )
-
-
     params.append(organization_id)
 
     try:
