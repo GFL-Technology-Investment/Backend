@@ -75,25 +75,97 @@ async def update_organization(
     db: sqlite3.Connection = Depends(get_db),
     _auth=Depends(require_permission("system.org.update")),
 ):
-    row = db.execute("SELECT * FROM organizations WHERE organization_id = ?", (organization_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Organization not found")
-    if payload.organization_id is not None:
-        updates.append("organization_id = ?"); params.append(payload.organization_id)
-    updates, params = [], []
-    if payload.name is not None:
-        updates.append("name = ?"); params.append(payload.name)
-    if payload.is_active is not None:
-        updates.append("is_active = ?"); params.append(1 if payload.is_active else 0)
+    # Kiểm tra organization tồn tại
+    row = db.execute(
+        "SELECT * FROM organizations WHERE organization_id = ?",
+        (organization_id,),
+    ).fetchone()
 
-    if updates:
-        params.append(organization_id)
-        db.execute(f"UPDATE organizations SET {', '.join(updates)} WHERE organization_id = ?", params)
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="Organization not found",
+        )
+
+    updates = []
+    params = []
+
+    # organization_id
+    if payload.organization_id is not None:
+        new_org = payload.organization_id.strip()
+
+        existing = db.execute(
+            """
+            SELECT organization_id
+            FROM organizations
+            WHERE organization_id = ?
+            AND organization_id != ?
+            """,
+            (new_org, organization_id),
+        ).fetchone()
+
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "status": "ORG_ALREADY_EXISTS",
+                    "message": "Organization ID đã tồn tại",
+                },
+            )
+
+        updates.append("organization_id = ?")
+        params.append(new_org)
+
+    # name
+    if payload.name is not None:
+        updates.append("name = ?")
+        params.append(payload.name.strip())
+
+    # is_active
+    if payload.is_active is not None:
+        updates.append("is_active = ?")
+        params.append(1 if payload.is_active else 0)
+
+    # Không có gì để update
+    if not updates:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "NOTHING_TO_UPDATE",
+                "message": "Không có dữ liệu cần cập nhật",
+            },
+        )
+
+
+    params.append(organization_id)
+
+    try:
+        db.execute(
+            f"""
+            UPDATE organizations
+            SET {', '.join(updates)}
+            WHERE organization_id = ?
+            """,
+            params,
+        )
         db.commit()
 
-    row = db.execute("SELECT * FROM organizations WHERE organization_id = ?", (organization_id,)).fetchone()
-    return dict(row)
+    except Exception:
+        db.rollback()
+        raise
 
+    # Nếu đổi organization_id thì query theo id mới
+    organization_id = payload.organization_id or organization_id
+
+    row = db.execute(
+        "SELECT * FROM organizations WHERE organization_id = ?",
+        (organization_id,),
+    ).fetchone()
+
+    return {
+        "status": "SUCCESS",
+        "organization": dict(row),
+    }
 
 @router.delete("/api/v1/organizations/{organization_id}")
 async def delete_organization(
