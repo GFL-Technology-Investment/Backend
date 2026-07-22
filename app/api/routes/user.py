@@ -116,6 +116,7 @@ class UpdateUserRequest(BaseModel):
     password: Optional[str] = Field(default=None, min_length=8)
     full_name: Optional[str] = None
     organization_id: Optional[str] = None
+    role_codes: Optional[List[str]] = None
     is_active: Optional[bool] = None
 
 
@@ -155,7 +156,7 @@ async def update_user(
 
         updates.append("email = ?")
         params.append(email)
-        
+
     if payload.password is not None:
         updates.append("password_hash = ?")
         params.append(hash_password(payload.password))
@@ -169,8 +170,56 @@ async def update_user(
         updates.append("organization_id = ?"); params.append(payload.organization_id)
     if payload.is_active is not None:
         updates.append("is_active = ?"); params.append(1 if payload.is_active else 0)
+    if payload.role_codes is not None:
+        role_ids = []
 
-    if updates:
+        for role_code in payload.role_codes:
+            role = db.execute(
+                "SELECT role_id FROM roles WHERE role_code = ?",
+                (role_code,),
+            ).fetchone()
+
+            if not role:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "status": "ROLE_NOT_FOUND",
+                        "message": f"Role '{role_code}' không tồn tại",
+                    },
+                )
+
+            role_ids.append(role["role_id"])
+
+        db.execute(
+            "DELETE FROM user_roles WHERE user_id = ?",
+            (user_id,),
+        )
+
+        for role_id in role_ids:
+            db.execute(
+                """
+                INSERT INTO user_roles
+                (
+                    user_role_id,
+                    user_id,
+                    role_id,
+                    assigned_by,
+                    assigned_at
+                )
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    user_id,
+                    role_id,
+                    _auth.user_id,
+                ),
+            )
+        if updates:
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            params.append(user_id)
+            db.execute(f"UPDATE users SET {', '.join(updates)} WHERE user_id = ?", params)
+            db.commit()
         updates.append("updated_at = CURRENT_TIMESTAMP")
         params.append(user_id)
         db.execute(f"UPDATE users SET {', '.join(updates)} WHERE user_id = ?", params)
