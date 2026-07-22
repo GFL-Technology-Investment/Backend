@@ -63,6 +63,7 @@ async def create_organization(
 
 
 class UpdateOrganizationRequest(BaseModel):
+    organization_id: Optional[str] = None
     name: Optional[str] = None
     is_active: Optional[bool] = None
 
@@ -77,7 +78,8 @@ async def update_organization(
     row = db.execute("SELECT * FROM organizations WHERE organization_id = ?", (organization_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Organization not found")
-
+    if payload.organization_id is not None:
+        updates.append("organization_id = ?"); params.append(payload.organization_id)
     updates, params = [], []
     if payload.name is not None:
         updates.append("name = ?"); params.append(payload.name)
