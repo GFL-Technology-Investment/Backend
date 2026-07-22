@@ -112,6 +112,8 @@ async def create_user(
 
 
 class UpdateUserRequest(BaseModel):
+    email: Optional[EmailStr] = None
+    password: Optional[str] = Field(default=None, min_length=8)
     full_name: Optional[str] = None
     organization_id: Optional[str] = None
     is_active: Optional[bool] = None
@@ -129,6 +131,35 @@ async def update_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     updates, params = [], []
+    if payload.email is not None:
+        email = payload.email.strip().lower()
+
+        existing = db.execute(
+            """
+            SELECT user_id
+            FROM users
+            WHERE email = ?
+            AND user_id != ?
+            """,
+            (email, user_id),
+        ).fetchone()
+
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "status": "EMAIL_ALREADY_EXISTS",
+                    "message": "Email đã được sử dụng",
+                },
+            )
+
+        updates.append("email = ?")
+        params.append(email)
+        
+    if payload.password is not None:
+        updates.append("password_hash = ?")
+        params.append(hash_password(payload.password))
+        
     if payload.full_name is not None:
         updates.append("full_name = ?"); params.append(payload.full_name)
     if payload.organization_id is not None:
