@@ -132,97 +132,53 @@ async def update_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     updates, params = [], []
+
     if payload.email is not None:
         email = payload.email.strip().lower()
-
         existing = db.execute(
-            """
-            SELECT user_id
-            FROM users
-            WHERE email = ?
-            AND user_id != ?
-            """,
-            (email, user_id),
+            "SELECT user_id FROM users WHERE email = ? AND user_id != ?", (email, user_id)
         ).fetchone()
-
         if existing:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "status": "EMAIL_ALREADY_EXISTS",
-                    "message": "Email đã được sử dụng",
-                },
-            )
-
-        updates.append("email = ?")
-        params.append(email)
+            raise HTTPException(status_code=409, detail={"status": "EMAIL_ALREADY_EXISTS", "message": "Email đã được sử dụng"})
+        updates.append("email = ?"); params.append(email)
 
     if payload.password is not None:
-        updates.append("password_hash = ?")
-        params.append(hash_password(payload.password))
-        
+        updates.append("password_hash = ?"); params.append(hash_password(payload.password))
+
     if payload.full_name is not None:
         updates.append("full_name = ?"); params.append(payload.full_name)
+
     if payload.organization_id is not None:
         org_row = db.execute("SELECT organization_id FROM organizations WHERE organization_id = ?", (payload.organization_id,)).fetchone()
         if not org_row:
             raise HTTPException(status_code=400, detail={"status": "ORG_NOT_FOUND", "message": "Tổ chức không tồn tại"})
         updates.append("organization_id = ?"); params.append(payload.organization_id)
+
     if payload.is_active is not None:
         updates.append("is_active = ?"); params.append(1 if payload.is_active else 0)
-    if payload.role_codes is not None:
-        role_ids = []
 
-        for role_code in payload.role_codes:
-            role = db.execute(
-                "SELECT role_id FROM roles WHERE role_code = ?",
-                (role_code,),
-            ).fetchone()
-
-            if not role:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "status": "ROLE_NOT_FOUND",
-                        "message": f"Role '{role_code}' không tồn tại",
-                    },
-                )
-
-            role_ids.append(role["role_id"])
-
-        db.execute(
-            "DELETE FROM user_roles WHERE user_id = ?",
-            (user_id,),
-        )
-
-        for role_id in role_ids:
-            db.execute(
-                """
-                INSERT INTO user_roles
-                (
-                    user_role_id,
-                    user_id,
-                    role_id,
-                    assigned_by,
-                    assigned_at
-                )
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    user_id,
-                    role_id,
-                    _auth.user_id,
-                ),
-            )
-        if updates:
-            updates.append("updated_at = CURRENT_TIMESTAMP")
-            params.append(user_id)
-            db.execute(f"UPDATE users SET {', '.join(updates)} WHERE user_id = ?", params)
-            db.commit()
+    # ĐỘC LẬP hoàn toàn với khối role_codes bên dưới — không lồng vào nhau
+    if updates:
         updates.append("updated_at = CURRENT_TIMESTAMP")
         params.append(user_id)
         db.execute(f"UPDATE users SET {', '.join(updates)} WHERE user_id = ?", params)
+        db.commit()
+
+    # Khối role_codes tách riêng, tự commit riêng — không phụ thuộc khối trên
+    if payload.role_codes is not None:
+        role_ids = []
+        for role_code in payload.role_codes:
+            role = db.execute("SELECT role_id FROM roles WHERE role_code = ?", (role_code,)).fetchone()
+            if not role:
+                raise HTTPException(status_code=400, detail={"status": "ROLE_NOT_FOUND", "message": f"Role '{role_code}' không tồn tại"})
+            role_ids.append(role["role_id"])
+
+        db.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
+        for role_id in role_ids:
+            db.execute(
+                "INSERT INTO user_roles (user_role_id, user_id, role_id, assigned_by, assigned_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (str(uuid.uuid4()), user_id, role_id, _auth.user_id),
+            )
         db.commit()
 
     row = db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
@@ -282,24 +238,6 @@ async def assign_user_roles(
 
     roles, permissions = get_user_roles_and_permissions(db, user_id)
     return {"status": "SUCCESS", "user_id": user_id, "roles": roles, "permissions": permissions}
-
-
-@router.get("/api/v1/roles")
-async def list_roles(
-    db: sqlite3.Connection = Depends(get_db),
-    _auth=Depends(require_permission("role.assign")),
-):
-    rows = db.execute("SELECT role_id, role_code, role_name, description FROM roles ORDER BY role_name").fetchall()
-    return {"roles": [dict(r) for r in rows]}
-
-
-@router.get("/api/v1/permissions")
-async def list_permissions(
-    db: sqlite3.Connection = Depends(get_db),
-    _auth=Depends(require_permission("role.assign")),
-):
-    rows = db.execute("SELECT permission_id, permission_code, permission_name, module_name FROM permissions ORDER BY module_name, permission_code").fetchall()
-    return {"permissions": [dict(r) for r in rows]}
 
 class UpdatePermissionRequest(BaseModel):
     permission_name: Optional[str] = None
