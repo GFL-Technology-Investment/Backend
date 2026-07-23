@@ -50,6 +50,21 @@ DEV_USERS = {
             "gate_id": "gate-001",
         },
     },
+     "admin@company.com": {
+        "user_id": "user-dev-002",
+        "password": "123456",
+        "email": "admin@company.com",
+        "org_id": "org-001",
+        "roles": ["Admin"],
+        "permissions": ["*"],
+        "camera": {
+            "camera_id": "camera-dev-001",
+            "camera_token": settings.dev_camera_token,
+            "org_id": "org-001",
+            "location_id": "loc-001",
+            "gate_id": "gate-001",
+        },
+    }
 }
 
 
@@ -133,47 +148,37 @@ async def dev_login(payload: DevLoginRequest, db: sqlite3.Connection = Depends(g
     user = DEV_USERS.get(email)
 
     if user:
-        # Giữ nguyên hành vi cũ cho 2 tài khoản hard-code — KHÔNG đổi gì
         if user["password"] != payload.password:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"status": "INVALID_CREDENTIALS", "message": "Invalid username or password"},
+                status_code=401,
+                detail={
+                    "status": "INVALID_CREDENTIALS",
+                    "message": "Invalid username or password",
+                },
             )
-        token = create_internal_jwt({
-            "sub": user["user_id"], "email": user["email"], "org_id": user["org_id"],
-            "roles": user["roles"], "permissions": user["permissions"],
-        })
-        return {
-            "status": "SUCCESS", "token_type": "Bearer", "access_token": token,
-            "expires_in_seconds": settings.internal_jwt_expire_seconds,
-            "user": {
-                "user_id": user["user_id"], "username": payload.username, "email": user["email"],
-                "organization_id": user["org_id"], "roles": user["roles"], "permissions": user["permissions"],
-            },
+
+    refresh_raw = _issue_refresh_token(
+        db,
+        user["user_id"],
+        user["org_id"],
+    )
+
+    db.commit()
+
+    return _build_token_response(
+        user_id=user["user_id"],
+        email=user["email"],
+        org_id=user["org_id"],
+        roles=user["roles"],
+        permissions=user["permissions"],
+        refresh_token_raw=refresh_raw,
+        extra={
             "camera": user["camera"],
             "usage": {
                 "internal_api": "Authorization: Bearer <access_token>",
                 "camera_api": "Authorization: Bearer <camera.camera_token>",
             },
-        }
-    user_row = db.execute(
-        "SELECT * FROM users WHERE email = ? AND is_active = 1", (email,)
-    ).fetchone()
-    print(user_row)
-    if not user_row or not user_row["password_hash"] or not verify_password(payload.password, user_row["password_hash"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"status": "INVALID_CREDENTIALS", "message": "Invalid username or password"},
-        )
-
-    roles, permissions = get_user_roles_and_permissions(db, user_row["user_id"])
-    refresh_raw = _issue_refresh_token(db, user_row["user_id"], user_row["organization_id"])
-    db.commit()
-
-    return _build_token_response(
-        user_id=user_row["user_id"], email=user_row["email"],
-        org_id=user_row["organization_id"], roles=roles, permissions=permissions,
-        refresh_token_raw=refresh_raw,
+        },
     )
 
 

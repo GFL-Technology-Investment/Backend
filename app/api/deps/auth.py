@@ -129,7 +129,12 @@ async def require_camera_auth(
     X-Organization-ID xác định request muốn ghi dữ liệu vào tổ chức nào.
     Backend phải check token đó có quyền với organization đó không.
     """
+    token = _token_from_credentials(credentials)
+    if token is None:
+        token = extract_bearer_token(request.headers.get("Authorization"))
 
+    print("Token =", token)
+    print("Token hash =", hash_camera_token(token) if token else None)
     if not settings.auth_enabled:
         context = CameraAuthContext(
             camera_client_id="auth-disabled-camera",
@@ -158,7 +163,6 @@ async def require_camera_auth(
         """,
         (token_hash,),
     ).fetchone()
-
     if not token_row:
         raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Invalid camera token")
 
