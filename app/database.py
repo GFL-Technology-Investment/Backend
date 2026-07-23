@@ -409,8 +409,8 @@ def seed_auth_data(conn: sqlite3.Connection) -> None:
             "guard@company.com",
             "Guard Dev",
             settings.default_organization_id,
-            '["guard"]',
-            '["ocr.cccd.create","face.compare","ticket.issue","ticket.print","access.checkout","history.read","*"]',
+            '["admin"]',
+            '["*"]',
             "azure-dev-user-001",
         ),
     )
