@@ -243,7 +243,14 @@ class UpdatePermissionRequest(BaseModel):
     permission_name: Optional[str] = None
     description: Optional[str] = None
 
-
+@router.get("/api/v1/permissions")
+async def list_permissions(
+    db: sqlite3.Connection = Depends(get_db),
+    _auth=Depends(require_permission("role.assign")),
+):
+    rows = db.execute("SELECT permission_id, permission_code, permission_name, module_name FROM permissions ORDER BY module_name, permission_code").fetchall()
+    return {"permissions": [dict(r) for r in rows]}
+    
 @router.patch("/api/v1/permissions/{permission_id}")
 async def update_permission(
     permission_id: str,
