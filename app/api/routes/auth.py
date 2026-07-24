@@ -136,52 +136,96 @@ def _build_token_response(
 
 def normalize_email(email: str) -> str:
     return email.strip().lower()
-@router.post("/dev-login")
-async def dev_login(payload: DevLoginRequest, db: sqlite3.Connection = Depends(get_db)):
-    if not settings.auth_dev_mode:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"status": AUTH_DEV_MODE_DISABLED, "message": "AUTH_DEV_MODE=false"},
-        )
-    email = normalize_email(payload.username)
-    print("username =", email)
-    user = DEV_USERS.get(email)
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
-    if user:
-        if user["password"] != payload.password:
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "status": "INVALID_CREDENTIALS",
-                    "message": "Invalid username or password",
+
+@router.post("/login")
+async def login(payload: LoginRequest, db: sqlite3.Connection = Depends(get_db)):
+    email = normalize_email(payload.email)
+
+    # ==========================
+    # 1. Dev account
+    # ==========================
+    if settings.auth_dev_mode:
+        dev_user = DEV_USERS.get(email)
+
+        if dev_user:
+            if dev_user["password"] != payload.password:
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "status": "INVALID_CREDENTIALS",
+                        "message": "Invalid email or password",
+                    },
+                )
+
+            refresh_raw = _issue_refresh_token(
+                db,
+                dev_user["user_id"],
+                dev_user["org_id"],
+            )
+            db.commit()
+
+            return _build_token_response(
+                user_id=dev_user["user_id"],
+                email=dev_user["email"],
+                org_id=dev_user["org_id"],
+                roles=dev_user["roles"],
+                permissions=dev_user["permissions"],
+                refresh_token_raw=refresh_raw,
+                extra={
+                    "camera": dev_user["camera"],
+                    "usage": {
+                        "internal_api": "Authorization: Bearer <access_token>",
+                        "camera_api": "Authorization: Bearer <camera.camera_token>",
+                    },
                 },
             )
 
+    # ==========================
+    # 2. User trong DB
+    # ==========================
+    user_row = db.execute(
+        "SELECT * FROM users WHERE email=? AND is_active=1",
+        (email,),
+    ).fetchone()
+
+    if (
+        not user_row
+        or not user_row["password_hash"]
+        or not verify_password(payload.password, user_row["password_hash"])
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "status": "INVALID_CREDENTIALS",
+                "message": "Invalid email or password",
+            },
+        )
+
+    roles, permissions = get_user_roles_and_permissions(
+        db,
+        user_row["user_id"],
+    )
+
     refresh_raw = _issue_refresh_token(
         db,
-        user["user_id"],
-        user["org_id"],
+        user_row["user_id"],
+        user_row["organization_id"],
     )
 
     db.commit()
 
     return _build_token_response(
-        user_id=user["user_id"],
-        email=user["email"],
-        org_id=user["org_id"],
-        roles=user["roles"],
-        permissions=user["permissions"],
+        user_id=user_row["user_id"],
+        email=user_row["email"],
+        org_id=user_row["organization_id"],
+        roles=roles,
+        permissions=permissions,
         refresh_token_raw=refresh_raw,
-        extra={
-            "camera": user["camera"],
-            "usage": {
-                "internal_api": "Authorization: Bearer <access_token>",
-                "camera_api": "Authorization: Bearer <camera.camera_token>",
-            },
-        },
     )
-
-
 @router.post("/refresh")
 async def refresh_access_token(
     refresh_token: str = Form(..., description="Refresh token nhận được khi login"),
