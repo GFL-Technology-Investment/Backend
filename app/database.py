@@ -150,6 +150,9 @@ _PERMISSION_SEED = [
     ("camera.view", "Xem camera", "camera"),
     ("camera.manage", "Quản lý camera", "camera"),
     ("ticket.issue", "Phát hành vé", "ticket"),
+    ("card.link", "Gắn thẻ vào phiên xe", "card"),
+    ("card.checkout", "Checkout bằng thẻ", "card"),
+    ("card.manage", "Quản lý kho thẻ (đăng ký/khóa thẻ)", "card"),
     ("ticket.print", "In vé", "ticket"),
     ("vehicle.approve", "Duyệt xe ra/vào", "vehicle"),
     ("report.export", "Xuất báo cáo", "report"),
@@ -170,9 +173,10 @@ _ROLE_PERMISSION_SEED = {
         "vehicle.approve", "report.export",
         "system.user.create", "system.user.update", "system.user.delete",
         "role.assign", "system.org.create", "system.org.update", "system.org.delete",
+        "camera.view", "ticket.issue", "vehicle.approve", "card.link", "card.checkout"
     ],
 
-    "GUARD": ["camera.view", "ticket.issue", "ticket.print","vehicle.approve"],
+    "GUARD": ["camera.view", "ticket.issue", "ticket.print","vehicle.approve","camera.view", "ticket.issue", "vehicle.approve", "card.link", "card.checkout"],
 
 }
 
@@ -587,6 +591,16 @@ def init_db() -> None:
                 UNIQUE (user_id, provider),
                 FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS access_cards (
+                card_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'AVAILABLE' CHECK (status IN ('AVAILABLE', 'IN_USE', 'DISABLED')),
+                session_id TEXT,
+                organization_id TEXT,
+                linked_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id) REFERENCES access_sessions(session_id)
+            );
             """
         )
 
@@ -634,6 +648,8 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_tickets_ticket_code ON tickets(ticket_code);
             CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
             CREATE INDEX IF NOT EXISTS idx_tickets_issued_at ON tickets(issued_at);
+            CREATE INDEX IF NOT EXISTS idx_access_cards_status ON access_cards(status);
+            CREATE INDEX IF NOT EXISTS idx_access_cards_session_id ON access_cards(session_id);
 
             CREATE INDEX IF NOT EXISTS idx_ticket_print_logs_ticket_id ON ticket_print_logs(ticket_id);
 
