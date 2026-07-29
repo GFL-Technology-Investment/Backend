@@ -48,10 +48,6 @@ async def checkout_by_card(
     db: sqlite3.Connection = Depends(get_db),
     _auth=Depends(require_permission("card.checkout")),
 ):
-    """Checkout bằng thẻ — KHÔNG viết lại logic checkout. Tra ra event_uid
-    của session đang gắn thẻ, rồi gọi thẳng checkout_access_session() đã có
-    sẵn (đúng cùng 1 nguồn sự thật cho nghiệp vụ checkout, tránh 2 nơi có
-    logic lệch nhau theo thời gian)."""
     session_id = card_service.get_session_id_by_card(db, payload.card_id)
 
     session = get_session_by_id(db, session_id)

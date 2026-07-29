@@ -12,10 +12,7 @@ def link_card_to_session(
     session_id: str,
     organization_id: Optional[str] = None,
 ) -> None:
-    """Gắn 1 thẻ đang RẢNH vào 1 session đã CHECKED_IN. Tự động 'đăng ký'
-    thẻ mới (upsert) nếu đây là lần đầu hệ thống thấy UID này — không cần
-    bước đăng ký thủ công riêng, giảm thao tác vận hành cho bảo vệ.
-    """
+    """Gắn thẻ với phiên, chỉ gắn được khi phiên đang CHECKED_IN và thẻ chưa được gắn cho phiên khác"""
     session_row = db.execute(
         "SELECT status FROM access_sessions WHERE session_id = ?", (session_id,)
     ).fetchone()
@@ -69,8 +66,7 @@ def get_session_id_by_card(db: sqlite3.Connection, card_id: str) -> str:
 
 
 def reset_card(db: sqlite3.Connection, card_id: str) -> None:
-    """Trả thẻ về trạng thái RẢNH sau khi checkout thành công — KHÔNG động
-    vào bộ nhớ vật lý của thẻ, chỉ xóa liên kết trong DB."""
+    """Reset thẻ về trạng thái AVAILABLE, xóa session_id"""
     db.execute(
         "UPDATE access_cards SET status = 'AVAILABLE', session_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
         (card_id,),

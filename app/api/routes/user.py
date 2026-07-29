@@ -258,10 +258,7 @@ async def update_permission(
     db: sqlite3.Connection = Depends(get_db),
     _auth=Depends(require_permission("permission.assign")),
 ):
-    """Chỉ sửa mô tả/tên hiển thị — KHÔNG cho đổi permission_code (đó là
-    string được hard-code trong Depends(require_permission("...")) ở khắp
-    routes, đổi giữa chừng sẽ làm mọi check quyền hiện có bị lệch ngay lập
-    tức). Cũng không có API tạo/xóa permission — xem giải thích đầu câu trả lời."""
+
     row = db.execute("SELECT * FROM permissions WHERE permission_id = ?", (permission_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Permission not found")
