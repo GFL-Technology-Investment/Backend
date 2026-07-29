@@ -452,7 +452,7 @@ async def azure_exchange(
     )
 
     provider_sub = str(claims.get("sub") or "")
-    email = claims.get("email") or claims.get("preferred_username").strip().lower() 
+    email = (claims.get("email") or claims.get("preferred_username") or "").strip().lower() 
 
     if not provider_sub or not email:
         raise HTTPException(
