@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+load_dotenv()  # đọc .env trước khi đọc các biến môi trường khác    
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:

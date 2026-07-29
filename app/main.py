@@ -37,5 +37,7 @@ def create_app() -> FastAPI:
     app.include_router(api_router)
     return app
 
-
+print("JWKS =", settings.azure_jwks_url)
+print("ISSUER =", settings.azure_issuer)
+print("CLIENT =", settings.azure_client_id)
 app = create_app()

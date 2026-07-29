@@ -1,15 +1,13 @@
 from __future__ import annotations
 import logging
 
-logger = logging.getLogger(__name__)
 import json
 import secrets
 import sqlite3
-import uuid
-from typing import Optional, Literal
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.deps.auth import require_internal_auth
 from app.core import oidc
@@ -23,6 +21,7 @@ from app.core.security import (
     verify_password
 )
 from app.core.status import AUTH_DEV_MODE_DISABLED
+from app.database import get_db
 
 from app.database import get_db
 from app.services.rbac_service import get_user_roles_and_permissions, assign_default_role   

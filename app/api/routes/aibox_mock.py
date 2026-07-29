@@ -18,13 +18,13 @@ router = APIRouter()
 async def mock_aibox_lpr_event(
     
     request: Request,
-    event_uid: Optional[str] = Form(None, description="event_uid tùy chọn để test retry duplicate từ camera/AIBox"),
     plate_number: str = Form(..., description="Biển số xe, ví dụ 30A12345"),
     organization_id: Optional[str] = Form(None, include_in_schema=False),
     location_id: str = Form("loc-001"),
     gate_id: str = Form("gate-001"),
     gate_name: str = Form("Cổng vào 01"),
     camera_id: str = Form("cam-gate-01"),
+    event_uid: Optional[str] = Form(None, description="UID của event, để trống thì BE tự sinh"),
     camera_name: str = Form("Camera cổng vào 01"),
     plate_image: UploadFile = File(..., description="Ảnh crop biển số"),
     frame_image: UploadFile = File(..., description="Ảnh toàn cảnh"),
@@ -215,7 +215,6 @@ async def mock_aibox_lpr_event(
 
 
 @router.post("/mock/aibox/link-vehicle-to-person")
-@router.post("/mock/aibox/link-vehicle-to-waiting-person")
 async def link_vehicle_to_waiting_person(
     request: Request,
     person_event_uid: str = Form(..., description="event_uid dạng PERSON-... trả về từ /ocr/cccd khi người OCR trước"),
