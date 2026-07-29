@@ -16,6 +16,7 @@ router = APIRouter()
 
 @router.post("/mock/aibox/lpr-event")
 async def mock_aibox_lpr_event(
+    
     request: Request,
     plate_number: str = Form(..., description="Biển số xe, ví dụ 30A12345"),
     organization_id: Optional[str] = Form(None, include_in_schema=False),
@@ -30,6 +31,7 @@ async def mock_aibox_lpr_event(
     driver_face_image: Optional[UploadFile] = File(None, description="Ảnh mặt tài xế từ camera nếu có"),
     db: sqlite3.Connection = Depends(get_db),
 ):
+    print("===== ENTER mock_aibox_lpr_event =====")
     camera_auth = getattr(request.state, "camera_auth", None)
     if camera_auth is not None:
         if organization_id and organization_id != camera_auth.organization_id:

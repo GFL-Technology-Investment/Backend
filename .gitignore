@@ -36,3 +36,5 @@ static/cccd_originals/
 .idea/
 .DS_Store
 Thumbs.db
+
+.database/

@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.services.access_service import *
 from app.services.ocr_service import extract_cccd
 from app.services.face_service import compare_face_image_paths, get_face_model_status
-
+from app.services.audit_service import write_audit_log
 router = APIRouter()
 
 @router.post("/api/v1/tickets/issue")
@@ -18,15 +18,28 @@ async def issue_ticket(
     request: Request,
     event_uid: Optional[str] = Form(None, description="event_uid LPR-... hoặc PERSON-..."),
     session_id: Optional[str] = Form(None),
-    ticket_type: str = Form("VISITOR_PASS", description="VISITOR_PASS / VEHICLE_PASS / PERSON_ONLY_PASS"),
+    ticket_type: str = Form("VISITOR_PASS"),
     issued_by: str = Form("guard-001"),
     force_reissue: bool = Form(False),
     db: sqlite3.Connection = Depends(get_db),
 ):
+    print("========== ISSUE TICKET ==========")
+    print("event_uid =", repr(event_uid))
+    print("session_id =", repr(session_id))
+    print("ticket_type =", repr(ticket_type))
+    print("content-type =", request.headers.get("content-type"))
+
     if not event_uid and not session_id:
         raise HTTPException(status_code=400, detail="Cần truyền event_uid hoặc session_id để tạo vé.")
 
-    session = get_session_by_id(db, session_id) if session_id else find_session_by_event_uid(db, event_uid or "")
+    session = (
+        get_session_by_id(db, session_id)
+        if session_id
+        else find_session_by_event_uid(db, event_uid)
+    )
+
+    print("session =", session)
+
     if not session:
         raise HTTPException(status_code=404, detail="Không tìm thấy session.")
 
@@ -38,13 +51,30 @@ async def issue_ticket(
         issued_by=issued_by,
         force_reissue=force_reissue,
     )
+
+    write_audit_log(
+        db,
+        "TICKET_ISSUED",
+        session_id=session["session_id"],
+        event_uid=event_uid,
+        actor_type="GUARD",
+        actor_id=issued_by,
+        detail={
+            "ticket_code": ticket.get("ticket_code"),
+            "ticket_type": ticket_type,
+        },
+    )
+
+    db.commit()
+
     return {
         "status": "SUCCESS",
-        "message": "Đã tạo vé. FE có thể mở front_image_url/back_image_url để preview.",
-        "data": build_ticket_payload(ticket, get_session_by_id(db, session["session_id"])),
+        "message": "Đã tạo vé.",
+        "data": build_ticket_payload(
+            ticket,
+            get_session_by_id(db, session["session_id"]),
+        ),
     }
-
-
 @router.get("/api/v1/tickets")
 async def list_tickets(
     page: int = Query(1, ge=1),
@@ -111,6 +141,11 @@ async def checkout_by_ticket_code(
         "checked_out_at": current_time,
         "updated_at": current_time,
     })
+    write_audit_log(
+        db, "TICKET_CHECKOUT",
+        session_id=session["session_id"], event_uid=session.get("event_uid"),
+        actor_type="GUARD", detail={"ticket_code": ticket_code},
+    )
     db.commit()
 
     return {
@@ -187,6 +222,12 @@ async def print_ticket(
         "printed_at": current_time,
         "error_message": None,
     })
+    write_audit_log(
+        db, "TICKET_PRINTED",
+        session_id=ticket.get("session_id"),
+        actor_type="GUARD", actor_id=printed_by,
+        detail={"ticket_id": ticket_id, "printer_name": printer_name},
+    )
     db.commit()
 
     return {

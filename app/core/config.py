@@ -6,8 +6,11 @@ File này chứa path/runtime settings và auth settings để tránh hard-code 
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
+from typing import Dict
 from dotenv import load_dotenv
-from dataclasses import dataclass
+
+load_dotenv()
 
 
 load_dotenv()  # đọc .env trước khi đọc các biến môi trường khác    
@@ -28,10 +31,41 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _build_oidc_providers() -> Dict[str, Dict[str, str]]:
+    providers: Dict[str, Dict[str, str]] = {}
+
+    keycloak_issuer = os.getenv("KEYCLOAK_ISSUER", "")
+    if keycloak_issuer:
+        providers["keycloak"] = {
+            "issuer": keycloak_issuer,
+            "jwks_url": os.getenv("KEYCLOAK_JWKS_URL") or f"{keycloak_issuer}/protocol/openid-connect/certs",
+            "client_id": os.getenv("KEYCLOAK_CLIENT_ID", ""),
+            "org_claim": os.getenv("KEYCLOAK_ORG_CLAIM", "org_id"),
+            "roles_claim": os.getenv("KEYCLOAK_ROLES_CLAIM", "realm_access.roles"),
+            "permissions_claim": os.getenv("KEYCLOAK_PERMISSIONS_CLAIM", "permissions"),
+        }
+
+    azure_tenant_id = os.getenv("AZURE_TENANT_ID", "")
+    if azure_tenant_id:
+        default_issuer = f"https://login.microsoftonline.com/{azure_tenant_id}/v2.0"
+        default_jwks_url = f"https://login.microsoftonline.com/{azure_tenant_id}/discovery/v2.0/keys"
+
+        providers["azure"] = {
+            "issuer": os.getenv("AZURE_ISSUER") or default_issuer,
+            "jwks_url": os.getenv("AZURE_JWKS_URL") or default_jwks_url,
+            "client_id": os.getenv("AZURE_CLIENT_ID", ""),
+            "org_claim": os.getenv("AZURE_ORG_CLAIM", "org_id"),
+            "roles_claim": os.getenv("AZURE_ROLES_CLAIM", "roles"),
+            "permissions_claim": os.getenv("AZURE_PERMISSIONS_CLAIM", "permissions"),
+        }
+
+    return providers
+
+
 @dataclass(frozen=True)
 class Settings:
     app_title: str = "OCR CCCD + Access Control API"
-    app_version: str = "2.1.0-auth"
+    app_version: str = "2.2.0-multi-idp"
 
     upload_folder: str = "uploads"
     static_folder: str = "static"
@@ -56,7 +90,12 @@ class Settings:
     internal_jwt_secret: str = os.getenv("INTERNAL_JWT_SECRET", "dev-internal-jwt-secret-change-me")
     internal_jwt_issuer: str = os.getenv("INTERNAL_JWT_ISSUER", "gfl-core")
     internal_jwt_audience: str = os.getenv("INTERNAL_JWT_AUDIENCE", "gfl-internal-api")
-    internal_jwt_expire_seconds: int = _env_int("INTERNAL_JWT_EXPIRE_SECONDS", 60 * 60 * 8)
+    internal_jwt_expire_seconds: int = _env_int("INTERNAL_JWT_EXPIRE_SECONDS", 60 * 15)
+
+    # Refresh token
+    refresh_token_expire_seconds: int = _env_int("REFRESH_TOKEN_EXPIRE_SECONDS", 60 * 60 * 24 * 7)
+    refresh_token_hash_pepper: str = os.getenv("REFRESH_TOKEN_HASH_PEPPER", "dev-refresh-token-pepper-change-me")
+    refresh_token_rotation_grace_seconds: int = _env_int("REFRESH_TOKEN_ROTATION_GRACE_SECONDS", 10)
 
     # Camera Auth
     camera_token_hash_pepper: str = os.getenv("CAMERA_TOKEN_HASH_PEPPER", "dev-camera-token-pepper-change-me")
@@ -65,19 +104,11 @@ class Settings:
     dev_camera_code: str = os.getenv("DEV_CAMERA_CODE", "cam-gate-01")
     dev_camera_name: str = os.getenv("DEV_CAMERA_NAME", "Camera cổng vào 01")
 
-    # Redis cache
-    redis_url: str = os.getenv("REDIS_URL", "")
-    redis_enabled: bool = _env_bool("REDIS_ENABLED", False)
+    # SSO — nhiều Identity Provider cùng lúc (Keycloak test + Azure AD thật).
+    # Xem _build_oidc_providers() phía trên để biết cách thêm provider mới.
+    oidc_providers: Dict[str, Dict[str, str]] = field(default_factory=_build_oidc_providers)
 
-    # Azure AD fields để tích hợp thật ở giai đoạn sau.
-    # Hiện tại PoC dùng dev-login để test internal JWT trước.
-    azure_tenant_id: str = os.getenv("AZURE_TENANT_ID", "")
-    azure_client_id: str = os.getenv("AZURE_CLIENT_ID", "")
-    azure_issuer: str = os.getenv("AZURE_ISSUER", "")
-    azure_jwks_url: str = os.getenv("AZURE_JWKS_URL", "")
-    azure_org_claim: str = os.getenv("AZURE_ORG_CLAIM", "org_id")
-    azure_roles_claim: str = os.getenv("AZURE_ROLES_CLAIM", "roles")
-    azure_permissions_claim: str = os.getenv("AZURE_PERMISSIONS_CLAIM", "permissions")
+    frontend_url: str = os.getenv("FRONTEND_URL", "http://localhost:5174")
 
 
 settings = Settings()

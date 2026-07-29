@@ -1,12 +1,13 @@
 import os
 import sqlite3
+import uuid
+import json
 from typing import AsyncIterator, Optional, Dict, Any, List
 
 from app.core.config import settings
 from app.core.security import hash_camera_token
 
 DB_PATH = os.getenv("ACCESS_DB_PATH", "access_control.db")
-
 
 ACCESS_SESSIONS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS access_sessions (
@@ -68,6 +69,45 @@ CREATE TABLE IF NOT EXISTS users (
     FOREIGN KEY (organization_id) REFERENCES organizations(organization_id)
 );
 
+CREATE TABLE IF NOT EXISTS roles (
+    role_id TEXT PRIMARY KEY,
+    role_code TEXT UNIQUE NOT NULL,
+    role_name TEXT NOT NULL,
+    description TEXT,
+    is_system INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS permissions (
+    permission_id TEXT PRIMARY KEY,
+    permission_code TEXT UNIQUE NOT NULL,
+    permission_name TEXT,
+    module_name TEXT,
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    user_role_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    role_id TEXT NOT NULL,
+    assigned_by TEXT,
+    assigned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, role_id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (role_id) REFERENCES roles(role_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role_permission_id TEXT PRIMARY KEY,
+    role_id TEXT NOT NULL,
+    permission_id TEXT NOT NULL,
+    UNIQUE (role_id, permission_id),
+    FOREIGN KEY (role_id) REFERENCES roles(role_id) ON DELETE CASCADE,
+    FOREIGN KEY (permission_id) REFERENCES permissions(permission_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS camera_clients (
     camera_client_id TEXT PRIMARY KEY,
     client_code TEXT UNIQUE NOT NULL,
@@ -100,6 +140,51 @@ CREATE TABLE IF NOT EXISTS camera_tokens (
 );
 """
 
+_ROLE_SEED = [
+    ("ADMIN", "Admin", "Toàn quyền hệ thống", 1),
+    ("MANAGER", "Manager", "Quản lý ", 1),
+    ("GUARD", "Guard", "Bảo vệ trực cổng", 1),
+]
+
+_PERMISSION_SEED = [
+    ("camera.view", "Xem camera", "camera"),
+    ("camera.manage", "Quản lý camera", "camera"),
+    ("ticket.issue", "Phát hành vé", "ticket"),
+    ("card.link", "Gắn thẻ vào phiên xe", "card"),
+    ("card.checkout", "Checkout bằng thẻ", "card"),
+    ("card.manage", "Quản lý kho thẻ (đăng ký/khóa thẻ)", "card"),
+    ("ticket.print", "In vé", "ticket"),
+    ("vehicle.approve", "Duyệt xe ra/vào", "vehicle"),
+    ("report.export", "Xuất báo cáo", "report"),
+    ("system.user.create", "Tạo user", "system"),
+    ("system.user.update", "Sửa user", "system"),
+    ("system.user.delete", "Xóa user", "system"),
+    ("role.assign", "Gán role", "system"),
+    ("permission.assign", "Gán permission", "system"),
+    ("system.org.create", "Tạo tổ chức", "system"),
+    ("system.org.update", "Sửa tổ chức", "system"),
+    ("system.org.delete", "Khóa tổ chức", "system"),
+]
+
+_ROLE_PERMISSION_SEED = {
+    "ADMIN": ["*"],
+    "MANAGER": [
+        "camera.view", "camera.manage", "ticket.issue", "ticket.print",
+        "vehicle.approve", "report.export",
+        "system.user.create", "system.user.update", "system.user.delete",
+        "role.assign", "system.org.create", "system.org.update", "system.org.delete",
+        "camera.view", "ticket.issue", "vehicle.approve", "card.link", "card.checkout"
+    ],
+
+    "GUARD": ["camera.view", "ticket.issue", "ticket.print","vehicle.approve","camera.view", "ticket.issue", "vehicle.approve", "card.link", "card.checkout"],
+
+}
+
+_LEGACY_ROLE_MAP = {
+    "admin": "ADMIN",
+    "guard": "GUARD",
+    "manager": "MANAGER",
+}
 
 
 def get_connection() -> sqlite3.Connection:
@@ -133,14 +218,6 @@ def get_table_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
 
 
 def migrate_access_sessions_schema(conn: sqlite3.Connection) -> None:
-    """Đưa access_sessions về schema mới:
-    - Bỏ access_direction.
-    - Thêm checked_in_at.
-    - Thêm link_policy để khóa PERSON_ONLY sau face compare.
-
-    Nếu DB cũ đã tồn tại từ bản trước, SQLite không hỗ trợ DROP COLUMN thuận tiện
-    trên mọi phiên bản nên ta tạo bảng mới rồi copy dữ liệu cần giữ lại.
-    """
     columns = get_table_columns(conn, "access_sessions")
     if not columns:
         return
@@ -186,44 +263,16 @@ def migrate_access_sessions_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         f"""
         INSERT OR REPLACE INTO access_sessions_new (
-            session_id,
-            session_code,
-            event_uid,
-            linked_vehicle_event_uid,
-            session_type,
-            organization_id,
-            location_id,
-            gate_id,
-            gate_name,
-            status,
-            link_policy,
-            expected_plate_number,
-            cccd_number,
-            full_name,
-            checked_in_at,
-            checked_out_at,
-            created_at,
-            updated_at
+            session_id, session_code, event_uid, linked_vehicle_event_uid,
+            session_type, organization_id, location_id, gate_id, gate_name,
+            status, link_policy, expected_plate_number, cccd_number, full_name,
+            checked_in_at, checked_out_at, created_at, updated_at
         )
         SELECT
-            session_id,
-            session_code,
-            event_uid,
-            linked_vehicle_event_uid,
-            session_type,
-            organization_id,
-            location_id,
-            gate_id,
-            gate_name,
-            status,
-            {link_policy_expr},
-            expected_plate_number,
-            cccd_number,
-            full_name,
-            {checked_in_expr},
-            checked_out_at,
-            created_at,
-            updated_at
+            session_id, session_code, event_uid, linked_vehicle_event_uid,
+            session_type, organization_id, location_id, gate_id, gate_name,
+            status, {link_policy_expr}, expected_plate_number, cccd_number, full_name,
+            {checked_in_expr}, checked_out_at, created_at, updated_at
         FROM access_sessions
         """
     )
@@ -233,29 +282,117 @@ def migrate_access_sessions_schema(conn: sqlite3.Connection) -> None:
 
 
 def migrate_tickets_schema(conn: sqlite3.Connection) -> None:
-    """Bổ sung qr_value cho DB cũ nếu đã tạo tickets từ bản trước."""
     columns = get_table_columns(conn, "tickets")
-    if not columns:
-        return
-    if "qr_value" not in columns:
+    if columns and "qr_value" not in columns:
         conn.execute("ALTER TABLE tickets ADD COLUMN qr_value TEXT")
 
 
+def migrate_user_identity_providers(conn: sqlite3.Connection) -> None:
+    columns = get_table_columns(conn, "users")
+    if not columns or "azure_user_id" not in columns:
+        return
+
+    rows = conn.execute(
+        "SELECT user_id, email, azure_user_id FROM users WHERE azure_user_id IS NOT NULL AND azure_user_id != ''"
+    ).fetchall()
+
+    for row in rows:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO user_identity_providers
+                (identity_id, user_id, provider, provider_sub, email_at_link)
+            VALUES (?, ?, 'keycloak', ?, ?)
+            """,
+            (str(uuid.uuid4()), row["user_id"], row["azure_user_id"], row["email"]),
+        )
+
+
+def migrate_refresh_tokens_schema(conn: sqlite3.Connection) -> None:
+    columns = get_table_columns(conn, "refresh_tokens")
+    if columns and "rotated_at" not in columns:
+        conn.execute("ALTER TABLE refresh_tokens ADD COLUMN rotated_at TEXT")
+
+
 def migrate_person_logs_schema(conn: sqlite3.Connection) -> None:
-    """Bổ sung cccd_image_hash để chống OCR submit trùng ảnh."""
     columns = get_table_columns(conn, "person_access_logs")
+    if columns and "cccd_image_hash" not in columns:
+        conn.execute("ALTER TABLE person_access_logs ADD COLUMN cccd_image_hash TEXT")
+
+def migrate_users_password_hash(conn: sqlite3.Connection) -> None:
+    columns = get_table_columns(conn, "users")
     if not columns:
         return
-    if "cccd_image_hash" not in columns:
-        conn.execute("ALTER TABLE person_access_logs ADD COLUMN cccd_image_hash TEXT")
+    if "password_hash" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+
+def migrate_legacy_user_roles(conn: sqlite3.Connection) -> None:
+    """Chuyển users.roles (JSON cũ) sang bảng user_roles chuẩn hóa."""
+    rows = conn.execute("SELECT user_id, roles FROM users WHERE roles IS NOT NULL AND roles != ''").fetchall()
+
+    for row in rows:
+        try:
+            legacy_roles = json.loads(row["roles"] or "[]")
+        except (TypeError, ValueError):
+            continue
+
+        for legacy_role in legacy_roles:
+            role_code = _LEGACY_ROLE_MAP.get(str(legacy_role).lower())
+            if not role_code:
+                continue
+
+            role_row = conn.execute("SELECT role_id FROM roles WHERE role_code = ?", (role_code,)).fetchone()
+            if not role_row:
+                continue
+
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO user_roles (user_role_id, user_id, role_id, assigned_by, assigned_at)
+                VALUES (?, ?, ?, 'system_migration', CURRENT_TIMESTAMP)
+                """,
+                (str(uuid.uuid4()), row["user_id"], role_row["role_id"]),
+            )
+
+
+def seed_rbac_data(conn: sqlite3.Connection) -> None:
+    """Seed roles/permissions/role_permissions cố định"""
+    for role_code, role_name, description, is_system in _ROLE_SEED:
+        conn.execute(
+            "INSERT OR IGNORE INTO roles (role_id, role_code, role_name, description, is_system) VALUES (?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), role_code, role_name, description, is_system),
+        )
+
+    for code, name, module in _PERMISSION_SEED:
+        conn.execute(
+            "INSERT OR IGNORE INTO permissions (permission_id, permission_code, permission_name, module_name) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), code, name, module),
+        )
+
+    all_permission_ids = [r["permission_id"] for r in conn.execute("SELECT permission_id FROM permissions").fetchall()]
+
+    for role_code, permission_codes in _ROLE_PERMISSION_SEED.items():
+        role_row = conn.execute("SELECT role_id FROM roles WHERE role_code = ?", (role_code,)).fetchone()
+        if not role_row:
+            continue
+
+        target_ids = (
+            all_permission_ids
+            if permission_codes == ["*"]
+            else [
+                r["permission_id"]
+                for code in permission_codes
+                for r in conn.execute("SELECT permission_id FROM permissions WHERE permission_code = ?", (code,)).fetchall()
+            ]
+        )
+
+        for permission_id in target_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO role_permissions (role_permission_id, role_id, permission_id) VALUES (?, ?, ?)",
+                (str(uuid.uuid4()), role_row["role_id"], permission_id),
+            )
 
 
 def seed_auth_data(conn: sqlite3.Connection) -> None:
-    """Seed dữ liệu auth tối thiểu để test local.
-
-    Token camera plaintext chỉ xuất hiện trong README/config env; DB chỉ lưu hash.
-    """
-
+    """Seed dữ liệu auth tối thiểu để test local."""
     conn.execute(
         "INSERT OR IGNORE INTO organizations (organization_id, name, is_active) VALUES (?, ?, 1)",
         (settings.default_organization_id, "Sân Nội Bài / Org test"),
@@ -276,8 +413,8 @@ def seed_auth_data(conn: sqlite3.Connection) -> None:
             "guard@company.com",
             "Guard Dev",
             settings.default_organization_id,
-            '["guard"]',
-            '["ocr.cccd.create","face.compare","ticket.issue","ticket.print","access.checkout","history.read","*"]',
+            '["admin"]',
+            '["*"]',
             "azure-dev-user-001",
         ),
     )
@@ -373,7 +510,6 @@ def init_db() -> None:
                 FOREIGN KEY (session_id) REFERENCES access_sessions(session_id) ON DELETE CASCADE
             );
 
-
             CREATE TABLE IF NOT EXISTS tickets (
                 ticket_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -411,17 +547,82 @@ def init_db() -> None:
 
                 FOREIGN KEY (ticket_id) REFERENCES tickets(ticket_id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                audit_log_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL CHECK (event_type IN (
+                    'OCR_CCCD', 'FACE_COMPARE', 'VEHICLE_DETECTED', 'VEHICLE_LINKED',
+                    'CHECK_OUT', 'TICKET_ISSUED', 'TICKET_PRINTED', 'TICKET_CHECKOUT'
+                )),
+                session_id TEXT,
+                event_uid TEXT,
+                organization_id TEXT,
+                gate_id TEXT,
+                actor_type TEXT CHECK (actor_type IN ('CAMERA', 'GUARD', 'SYSTEM')),
+                actor_id TEXT,
+                result_status TEXT NOT NULL DEFAULT 'SUCCESS',
+                detail TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                refresh_token_id TEXT PRIMARY KEY,
+                user_id          TEXT NOT NULL,
+                token_hash       TEXT NOT NULL UNIQUE,
+                organization_id  TEXT NOT NULL,
+                issued_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at       TEXT NOT NULL,
+                is_revoked       INTEGER NOT NULL DEFAULT 0,
+                replaced_by      TEXT,
+                rotated_at       TEXT,
+                created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS user_identity_providers (
+                identity_id      TEXT PRIMARY KEY,
+                user_id          TEXT NOT NULL,
+                provider         TEXT NOT NULL CHECK (provider IN ('keycloak', 'azure')),
+                provider_sub     TEXT NOT NULL,
+                email_at_link    TEXT,
+                linked_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+                UNIQUE (provider, provider_sub),
+                UNIQUE (user_id, provider),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS access_cards (
+                card_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'AVAILABLE' CHECK (status IN ('AVAILABLE', 'IN_USE', 'DISABLED')),
+                session_id TEXT,
+                organization_id TEXT,
+                linked_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id) REFERENCES access_sessions(session_id)
+            );
             """
         )
+
         migrate_access_sessions_schema(conn)
         migrate_tickets_schema(conn)
         migrate_person_logs_schema(conn)
-        seed_auth_data(conn)
+        migrate_users_password_hash(conn)
+        migrate_refresh_tokens_schema(conn)
+        seed_rbac_data(conn)                    
+        seed_auth_data(conn)                    
+        migrate_user_identity_providers(conn)   
+        migrate_legacy_user_roles(conn)         
+
+        # Tạo Index
         conn.executescript(
             """
             CREATE INDEX IF NOT EXISTS idx_access_sessions_event_uid ON access_sessions(event_uid);
             CREATE INDEX IF NOT EXISTS idx_access_sessions_linked_vehicle_event_uid ON access_sessions(linked_vehicle_event_uid);
             CREATE INDEX IF NOT EXISTS idx_access_sessions_status ON access_sessions(status);
+            CREATE INDEX IF NOT EXISTS idx_user_roles_user_id ON user_roles(user_id);
+            CREATE INDEX IF NOT EXISTS idx_user_roles_role_id ON user_roles(role_id);
+            CREATE INDEX IF NOT EXISTS idx_role_permissions_role_id ON role_permissions(role_id);
             CREATE INDEX IF NOT EXISTS idx_access_sessions_link_policy ON access_sessions(link_policy);
             CREATE INDEX IF NOT EXISTS idx_access_sessions_session_type ON access_sessions(session_type);
             CREATE INDEX IF NOT EXISTS idx_access_sessions_org_gate ON access_sessions(organization_id, gate_id);
@@ -443,11 +644,12 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_person_cccd_image_hash ON person_access_logs(cccd_image_hash);
             CREATE INDEX IF NOT EXISTS idx_person_created_at ON person_access_logs(created_at);
 
-
             CREATE INDEX IF NOT EXISTS idx_tickets_session_id ON tickets(session_id);
             CREATE INDEX IF NOT EXISTS idx_tickets_ticket_code ON tickets(ticket_code);
             CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
             CREATE INDEX IF NOT EXISTS idx_tickets_issued_at ON tickets(issued_at);
+            CREATE INDEX IF NOT EXISTS idx_access_cards_status ON access_cards(status);
+            CREATE INDEX IF NOT EXISTS idx_access_cards_session_id ON access_cards(session_id);
 
             CREATE INDEX IF NOT EXISTS idx_ticket_print_logs_ticket_id ON ticket_print_logs(ticket_id);
 
@@ -455,6 +657,11 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_auth_users_org ON users(organization_id);
             CREATE INDEX IF NOT EXISTS idx_auth_camera_tokens_hash ON camera_tokens(token_hash);
             CREATE INDEX IF NOT EXISTS idx_auth_camera_org ON camera_client_organizations(camera_client_id, organization_id);
+
+            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash    ON refresh_tokens(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires  ON refresh_tokens(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_user_identity_providers_user_id ON user_identity_providers(user_id);
             """
         )
         conn.commit()

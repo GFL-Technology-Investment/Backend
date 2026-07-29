@@ -12,6 +12,7 @@ from app.services.ocr_service import extract_cccd
 from app.services.face_service import compare_face_image_paths, get_face_model_status
 from app.core.security import AuthError
 from app.core.status import ORG_MISMATCH
+from app.services.audit_service import write_audit_log
 router = APIRouter()
 
 @router.post("/ocr/cccd")
@@ -78,12 +79,13 @@ async def ocr_cccd(
                 detail="Không tìm thấy session tương ứng event_uid"
          )
         session_org_id = session.get("organization_id")
-        if session_org_id  != organization_id:
-            raise AuthError(
-                 403,
-                 ORG_MISMATCH,
-                 "Không được ghép CCCD của organization này với xe/session thuộc organization khác",
-             )
+        session_org_id = session.get("organization_id")
+        if session_org_id != organization_id:
+             raise AuthError(
+                403,
+                ORG_MISMATCH,
+                "Không được ghép CCCD của organization này với xe/session thuộc organization khác",
+            )
         assert_can_link_person_to_vehicle(session)
 
         existing_person = get_person_log_by_session_id(db, session["session_id"])
@@ -129,6 +131,26 @@ async def ocr_cccd(
                 "full_name": result.get("name"),
                 "updated_at": current_time,
             },
+        )
+        upsert_row(db, "person_access_logs", person_data)
+        update_by_key(
+            db,
+            "access_sessions",
+            "session_id",
+            session["session_id"],
+            {
+                "status": "WAITING_FACE_COMPARE",
+                "cccd_number": result.get("id"),
+                "full_name": result.get("name"),
+                "updated_at": current_time,
+            },
+        )
+        write_audit_log(
+            db, "OCR_CCCD",
+            session_id=session["session_id"], event_uid=event_uid,
+            organization_id=organization_id, gate_id=gate_id,
+            actor_type="GUARD", result_status="SUCCESS",
+            detail={"cccd_number": result.get("id"), "flow": "A_VEHICLE_FIRST"},
         )
         db.commit()
         linked_session = get_session_by_id(db, session["session_id"])
@@ -187,6 +209,13 @@ async def ocr_cccd(
         try:
             insert_row(db, "access_sessions", session_data)
             insert_row(db, "person_access_logs", person_data)
+            write_audit_log(
+                db, "OCR_CCCD",
+                session_id=session_id, event_uid=person_event_uid,
+                organization_id=organization_id, gate_id=gate_id,
+                actor_type="GUARD", result_status="SUCCESS",
+                detail={"cccd_number": result.get("id"), "flow": "B_C_PERSON_FIRST"},
+            )
             db.commit()
         except sqlite3.IntegrityError as exc:
             db.rollback()
