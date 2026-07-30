@@ -23,6 +23,7 @@ from app.core.status import (
     PERMISSION_DENIED,
 )
 from app.database import get_db
+from app.services.session_service import get_session, touch_session
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -79,11 +80,25 @@ async def require_internal_auth(
     user_id = str(payload.get("sub") or payload.get("user_id") or "")
     email = str(payload.get("email") or "")
     organization_id = str(payload.get("org_id") or payload.get("organization_id") or "")
+    session_id = str(payload.get("session_id") or "")
     roles = [str(item) for item in payload.get("roles", [])]
     permissions = [str(item) for item in payload.get("permissions", [])]
 
     if not user_id or not email or not organization_id:
         raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Internal token missing required claims")
+
+    if settings.redis_enabled:
+        if not session_id:
+            raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Internal token missing session_id")
+
+        session = await get_session(session_id)
+        if not session:
+            raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Session revoked or expired")
+
+        if session.get("user_id") != user_id or session.get("organization_id") != organization_id:
+            raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Session does not match token claims")
+
+        await touch_session(session_id)
 
     row = db.execute("SELECT * FROM users WHERE user_id = ? AND is_active = 1", (user_id,)).fetchone()
     if not row:
@@ -99,6 +114,7 @@ async def require_internal_auth(
         organization_id=organization_id,
         roles=roles,
         permissions=permissions,
+        session_id=session_id or None,
     )
     request.state.internal_auth = context
     return context

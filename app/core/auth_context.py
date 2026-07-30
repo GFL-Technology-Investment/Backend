@@ -1,7 +1,3 @@
-"""Auth context objects injected into request.state after auth guards pass.
-
-Tách context để service/route không phải đọc trực tiếp JWT/header ở nhiều nơi.
-"""
 
 from __future__ import annotations
 
@@ -18,6 +14,7 @@ class InternalAuthContext:
     organization_id: str
     roles: List[str] = field(default_factory=list)
     permissions: List[str] = field(default_factory=list)
+    session_id: Optional[str] = None
     token_type: str = "internal"
 
     def has_permission(self, permission_code: str) -> bool:
@@ -30,6 +27,7 @@ class InternalAuthContext:
             "organization_id": self.organization_id,
             "roles": self.roles,
             "permissions": self.permissions,
+            "session_id": self.session_id,
             "token_type": self.token_type,
         }
 

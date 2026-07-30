@@ -306,12 +306,18 @@ def migrate_user_identity_providers(conn: sqlite3.Connection) -> None:
             (str(uuid.uuid4()), row["user_id"], row["azure_user_id"], row["email"]),
         )
 
-
 def migrate_refresh_tokens_schema(conn: sqlite3.Connection) -> None:
     columns = get_table_columns(conn, "refresh_tokens")
-    if columns and "rotated_at" not in columns:
-        conn.execute("ALTER TABLE refresh_tokens ADD COLUMN rotated_at TEXT")
-
+    if not columns:
+        return
+    if "rotated_at" not in columns:
+        conn.execute(
+            "ALTER TABLE refresh_tokens ADD COLUMN rotated_at TEXT"
+        )
+    if "session_id" not in columns:
+        conn.execute(
+            "ALTER TABLE refresh_tokens ADD COLUMN session_id TEXT"
+        )
 
 def migrate_person_logs_schema(conn: sqlite3.Connection) -> None:
     columns = get_table_columns(conn, "person_access_logs")
@@ -570,6 +576,7 @@ def init_db() -> None:
                 user_id          TEXT NOT NULL,
                 token_hash       TEXT NOT NULL UNIQUE,
                 organization_id  TEXT NOT NULL,
+                session_id TEXT,
                 issued_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 expires_at       TEXT NOT NULL,
                 is_revoked       INTEGER NOT NULL DEFAULT 0,
@@ -660,6 +667,7 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash    ON refresh_tokens(token_hash);
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_session_id ON refresh_tokens(session_id);
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires  ON refresh_tokens(expires_at);
             CREATE INDEX IF NOT EXISTS idx_user_identity_providers_user_id ON user_identity_providers(user_id);
             """

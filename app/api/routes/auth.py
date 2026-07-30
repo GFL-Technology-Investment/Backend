@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from typing import Optional, Literal
 
-from fastapi import APIRouter, Depends, Form, HTTPException, status
+from fastapi import APIRouter, Cookie, Depends, Form, HTTPException, Response, status
 from pydantic import BaseModel
 
 from app.api.deps.auth import require_internal_auth
@@ -26,7 +26,30 @@ from app.core.status import AUTH_DEV_MODE_DISABLED
 
 from app.database import get_db
 from app.services.rbac_service import get_user_roles_and_permissions, assign_default_role   
+from app.services.session_service import create_session, delete_session, get_session, update_session
 router = APIRouter(prefix="/api/v1/auth")
+
+
+def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    response.set_cookie(
+        key=settings.refresh_cookie_name,
+        value=refresh_token,
+        max_age=settings.refresh_token_expire_seconds,
+        httponly=True,
+        secure=settings.refresh_cookie_secure,
+        samesite=settings.refresh_cookie_samesite,
+        path=settings.refresh_cookie_path,
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=settings.refresh_cookie_name,
+        httponly=True,
+        secure=settings.refresh_cookie_secure,
+        samesite=settings.refresh_cookie_samesite,
+        path=settings.refresh_cookie_path,
+    )
 
 
 class DevLoginRequest(BaseModel):
@@ -40,7 +63,7 @@ DEV_USERS = {
         "password": "123456",
         "email": "guard@company.com",
         "org_id": "org-001",
-        "roles": ["Admin"],
+        "roles": ["ADMIN"],
         "permissions": ["*"],
         "camera": {
             "camera_id": "camera-dev-001",
@@ -55,7 +78,7 @@ DEV_USERS = {
         "password": "123456",
         "email": "admin@company.com",
         "org_id": "org-001",
-        "roles": ["Admin"],
+        "roles": ["ADMIN"],
         "permissions": ["*"],
         "camera": {
             "camera_id": "camera-dev-001",
@@ -68,13 +91,25 @@ DEV_USERS = {
 }
 
 
-def _issue_refresh_token(
+async def _issue_refresh_token(
     db: sqlite3.Connection,
     user_id: str,
     organization_id: str,
-) -> str:
+    email: str,
+    roles: list,
+    permissions: list,
+) -> tuple[str, str]:
     """Tạo refresh token mới, lưu hash vào DB, trả plaintext."""
     raw = generate_refresh_token()
+    refresh_hash = hash_refresh_token(raw)
+    session_id = await create_session(
+        user_id=user_id,
+        email=email,
+        organization_id=organization_id,
+        roles=roles,
+        permissions=permissions,
+        refresh_token_hash=refresh_hash,
+    )
     now_sql = db.execute("SELECT datetime('now') AS n").fetchone()["n"]
     expires_sql = db.execute(
         "SELECT datetime('now', ? ) AS e",
@@ -84,19 +119,28 @@ def _issue_refresh_token(
     db.execute(
         """
         INSERT INTO refresh_tokens
-            (refresh_token_id, user_id, token_hash, organization_id, issued_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        (
+            refresh_token_id,
+            user_id,
+            token_hash,
+            organization_id,
+            session_id,
+            issued_at,
+            expires_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(uuid.uuid4()),
             user_id,
-            hash_refresh_token(raw),
+            refresh_hash,
             organization_id,
+            session_id,
             now_sql,
             expires_sql,
         ),
     )
-    return raw
+    return raw, session_id
 
 
 def _build_token_response(
@@ -106,6 +150,7 @@ def _build_token_response(
     roles: list,
     permissions: list,
     refresh_token_raw: str,
+    session_id: Optional[str] = None,
     extra: Optional[dict] = None,
 ) -> dict:
     access_token = create_internal_jwt({
@@ -114,14 +159,15 @@ def _build_token_response(
         "org_id": org_id,
         "roles": roles,
         "permissions": permissions,
+        "session_id": session_id,
     })
     resp = {
         "status": "SUCCESS",
         "token_type": "Bearer",
         "access_token": access_token,
-        "refresh_token": refresh_token_raw,
         "expires_in_seconds": settings.internal_jwt_expire_seconds,
         "refresh_expires_in_seconds": settings.refresh_token_expire_seconds,
+        "session_id": session_id,
         "user": {
             "user_id": user_id,
             "email": email,
@@ -142,7 +188,11 @@ class LoginRequest(BaseModel):
 
 
 @router.post("/login")
-async def login(payload: LoginRequest, db: sqlite3.Connection = Depends(get_db)):
+async def login(
+    payload: LoginRequest,
+    response: Response,
+    db: sqlite3.Connection = Depends(get_db),
+):
     email = normalize_email(payload.email)
 
     # ==========================
@@ -161,10 +211,13 @@ async def login(payload: LoginRequest, db: sqlite3.Connection = Depends(get_db))
                     },
                 )
 
-            refresh_raw = _issue_refresh_token(
-                db,
-                dev_user["user_id"],
-                dev_user["org_id"],
+            refresh_raw, session_id = await _issue_refresh_token(
+                db=db,
+                user_id=dev_user["user_id"],
+                organization_id=dev_user["org_id"],
+                email=dev_user["email"],
+                roles=dev_user["roles"],
+                permissions=dev_user["permissions"],
             )
             db.commit()
 
@@ -175,6 +228,7 @@ async def login(payload: LoginRequest, db: sqlite3.Connection = Depends(get_db))
                 roles=dev_user["roles"],
                 permissions=dev_user["permissions"],
                 refresh_token_raw=refresh_raw,
+                session_id=session_id,
                 extra={
                     "camera": dev_user["camera"],
                     "usage": {
@@ -210,12 +264,14 @@ async def login(payload: LoginRequest, db: sqlite3.Connection = Depends(get_db))
         user_row["user_id"],
     )
 
-    refresh_raw = _issue_refresh_token(
-        db,
-        user_row["user_id"],
-        user_row["organization_id"],
+    refresh_raw, session_id = await _issue_refresh_token(
+        db=db,
+        user_id=user_row["user_id"],
+        organization_id=user_row["organization_id"],
+        email=user_row["email"],
+        roles=roles,
+        permissions=permissions,
     )
-
     db.commit()
 
     return _build_token_response(
@@ -225,6 +281,7 @@ async def login(payload: LoginRequest, db: sqlite3.Connection = Depends(get_db))
         roles=roles,
         permissions=permissions,
         refresh_token_raw=refresh_raw,
+        session_id=session_id, 
     )
 @router.post("/refresh")
 async def refresh_access_token(
@@ -266,25 +323,67 @@ async def refresh_access_token(
                     detail={"status": "USER_INACTIVE", "message": "Tài khoản không tồn tại hoặc đã bị khóa"},
                 )
 
+            roles, permissions = get_user_roles_and_permissions(db, user_row["user_id"])
+            session_id = row["session_id"]
+
+            if session_id:
+                session = await get_session(session_id)
+                if not session:
+                    db.execute(
+                        "UPDATE refresh_tokens SET is_revoked = 1 WHERE refresh_token_id = ?",
+                        (row["refresh_token_id"],),
+                    )
+                    db.commit()
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail={"status": "SESSION_REVOKED", "message": "Phiên đăng nhập đã hết hạn hoặc bị thu hồi"},
+                    )
+            else:
+                session_id = await create_session(
+                    user_id=user_row["user_id"],
+                    email=user_row["email"],
+                    organization_id=row["organization_id"],
+                    roles=roles,
+                    permissions=permissions,
+                    refresh_token_hash=current_hash,
+                )
+
             new_raw = generate_refresh_token()
+            new_hash = hash_refresh_token(new_raw)
             now_sql = db.execute("SELECT datetime('now') AS n").fetchone()["n"]
             expires_sql = db.execute(
                 "SELECT datetime('now', ?) AS e",
                 (f"+{settings.refresh_token_expire_seconds} seconds",),
             ).fetchone()["e"]
 
+            await update_session(
+                session_id,
+                user_id=user_row["user_id"],
+                email=user_row["email"],
+                organization_id=row["organization_id"],
+                roles=roles,
+                permissions=permissions,
+                refresh_token_hash=new_hash,
+            )
+
             db.execute(
                 """
                 INSERT INTO refresh_tokens
-                    (refresh_token_id, user_id, token_hash, organization_id, issued_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (refresh_token_id, user_id, token_hash, organization_id, session_id, issued_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (new_refresh_id, row["user_id"], hash_refresh_token(new_raw),
-                 row["organization_id"], now_sql, expires_sql),
+                (
+                    new_refresh_id,
+                    row["user_id"],
+                    new_hash,
+                    row["organization_id"],
+                    session_id,
+                    now_sql,
+                    expires_sql,
+                ),
             )
             db.commit()
-
-            roles, permissions = get_user_roles_and_permissions(db, user_row["user_id"])
+            _set_refresh_cookie(response, refresh_raw)
 
             return _build_token_response(
                 user_id=user_row["user_id"],
@@ -293,6 +392,7 @@ async def refresh_access_token(
                 roles=roles,
                 permissions=permissions,
                 refresh_token_raw=new_raw,
+                session_id=session_id,
             )
 
         # Thua race — xem lý do chính xác để quyết định bước tiếp theo
@@ -354,6 +454,8 @@ async def refresh_access_token(
                 "UPDATE refresh_tokens SET is_revoked = 1 WHERE user_id = ?",
                 (row["user_id"],),
             )
+            if row["session_id"]:
+                await delete_session(row["session_id"])
             db.commit()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -379,12 +481,29 @@ async def logout(
     db: sqlite3.Connection = Depends(get_db),
 ):
     """Thu hồi refresh token. Access token vẫn có hiệu lực đến khi hết exp (chấp nhận được vì đã ngắn 15 phút)."""
+    session_id = auth.session_id
     if refresh_token:
         token_hash = hash_refresh_token(refresh_token)
+        row = db.execute(
+            "SELECT session_id FROM refresh_tokens WHERE token_hash = ? AND user_id = ?",
+            (token_hash, auth.user_id),
+        ).fetchone()
+        if row and row["session_id"]:
+            session_id = row["session_id"]
         db.execute(
             "UPDATE refresh_tokens SET is_revoked = 1 WHERE token_hash = ? AND user_id = ?",
             (token_hash, auth.user_id),
         )
+    elif session_id:
+        db.execute(
+            "UPDATE refresh_tokens SET is_revoked = 1 WHERE session_id = ? AND user_id = ?",
+            (session_id, auth.user_id),
+        )
+
+    if session_id:
+        await delete_session(session_id)
+
+    if refresh_token or session_id:
         db.commit()
 
     logout_url = None
@@ -526,8 +645,16 @@ async def azure_exchange(
         user_id,
     )
 
-    refresh_raw = _issue_refresh_token(db, user_id, org_id)
+    refresh_raw, session_id = await _issue_refresh_token(
+        db=db,
+        user_id=user_id,
+        organization_id=org_id,
+        email=user_row["email"],
+        roles=roles,
+        permissions=permissions,
+    )
     db.commit()
+    _set_refresh_cookie(response, refresh_raw)
 
     return _build_token_response(
         user_id=user_id,
@@ -536,4 +663,5 @@ async def azure_exchange(
         roles=roles,
         permissions=permissions,
         refresh_token_raw=refresh_raw,
+        session_id=session_id,
     )

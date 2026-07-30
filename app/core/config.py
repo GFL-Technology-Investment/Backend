@@ -1,8 +1,3 @@
-"""Cấu hình dùng chung cho API access-control PoC.
-
-File này chứa path/runtime settings và auth settings để tránh hard-code rải rác.
-"""
-
 from __future__ import annotations
 
 import os
@@ -95,6 +90,17 @@ class Settings:
     refresh_token_expire_seconds: int = _env_int("REFRESH_TOKEN_EXPIRE_SECONDS", 60 * 60 * 24 * 7)
     refresh_token_hash_pepper: str = os.getenv("REFRESH_TOKEN_HASH_PEPPER", "dev-refresh-token-pepper-change-me")
     refresh_token_rotation_grace_seconds: int = _env_int("REFRESH_TOKEN_ROTATION_GRACE_SECONDS", 10)
+    refresh_cookie_name: str = os.getenv("REFRESH_COOKIE_NAME", "gfl_refresh_token")
+    refresh_cookie_secure: bool = _env_bool("REFRESH_COOKIE_SECURE", False)
+    refresh_cookie_samesite: str = os.getenv("REFRESH_COOKIE_SAMESITE", "lax")
+    refresh_cookie_path: str = os.getenv("REFRESH_COOKIE_PATH", "/api/v1/auth")
+
+    # Redis
+    redis_enabled: bool = _env_bool("REDIS_ENABLED", False)
+    redis_url: str = os.getenv(
+        "REDIS_URL",
+        "redis://localhost:6379/0",
+    )
 
     # Camera Auth
     camera_token_hash_pepper: str = os.getenv("CAMERA_TOKEN_HASH_PEPPER", "dev-camera-token-pepper-change-me")

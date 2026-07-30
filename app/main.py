@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.router import api_router
 from app.core.config import settings, ensure_runtime_folders
 from app.database import init_db
+from app.core.redis import init_redis, close_redis
 def create_app() -> FastAPI:
     ensure_runtime_folders()
 
@@ -31,8 +32,13 @@ def create_app() -> FastAPI:
     )
 
     @app.on_event("startup")
-    def on_startup() -> None:
-        init_db()
+    async def on_startup():
+        init_db()   
+        await init_redis()
+
+    @app.on_event("shutdown")
+    async def on_shutdown():
+        await close_redis()
 
     app.include_router(api_router)
     return app
