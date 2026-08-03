@@ -3,16 +3,21 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
 import sqlite3
 import uuid
 from typing import Optional, Dict, Any, List, Tuple
 
-from fastapi import HTTPException, Request, UploadFile
+from fastapi import HTTPException, Request
 
 from app.core.config import settings
 from app.core.time import now_vn
-from app.core.files import static_url_to_local_path
+from app.core.files import (
+    absolute_url,
+    safe_extension,
+    save_upload_file,
+    static_url_to_local_path,
+    to_static_url,
+)
 from app.core.status import (
     ACTIVE_SESSION_STATUSES,
     STATUS_CHECKED_IN,
@@ -23,10 +28,24 @@ from app.core.status import (
 )
 from app.database import row_to_dict, DB_PATH
 from app.services.ticket_renderer import render_ticket_images
+from app.services.access_query_service import (
+    build_session_detail,
+    build_ticket_payload,
+    find_session_by_event_uid,
+    get_latest_ticket_by_session_id,
+    get_person_log,
+    get_person_log_by_session_id,
+    get_session_by_id,
+    get_ticket_by_code,
+    get_ticket_by_id,
+    get_vehicle_log,
+    get_vehicle_log_by_session_id,
+    insert_row,
+    update_by_key,
+    upsert_row,
+)
 
 
-# Runtime folders exported for route modules that currently use `from app.services.access_service import *`.
-# Keep these aliases to avoid NameError after refactor.
 UPLOAD_FOLDER = settings.upload_folder
 STATIC_FOLDER = settings.static_folder
 MEDIA_FOLDER = settings.media_folder
@@ -258,168 +277,6 @@ def assert_can_link_person_to_vehicle(session: Dict[str, Any]) -> None:
 
     if session.get("status") != "WAITING_PERSON":
         raise HTTPException(status_code=400, detail="Chỉ session trạng thái WAITING_PERSON mới được OCR CCCD để ghép người vào xe.")
-
-
-def safe_extension(filename: Optional[str], default: str = ".jpg") -> str:
-    if not filename:
-        return default
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
-        return default
-    return ext
-
-
-def save_upload_file(upload_file: UploadFile, folder: str, prefix: str = "file") -> str:
-    os.makedirs(folder, exist_ok=True)
-    ext = safe_extension(upload_file.filename)
-    file_name = f"{prefix}-{uuid.uuid4().hex}{ext}"
-    file_path = os.path.join(folder, file_name)
-
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(upload_file.file, buffer)
-
-    return file_path
-
-
-def to_static_url(file_path: Optional[str]) -> Optional[str]:
-    if not file_path:
-        return None
-    normalized = file_path.replace("\\", "/")
-    if normalized.startswith("static/"):
-        return "/" + normalized
-    return normalized
-
-
-def absolute_url(request: Request, url_path: Optional[str]) -> Optional[str]:
-    if not url_path:
-        return None
-    if url_path.startswith("http://") or url_path.startswith("https://"):
-        return url_path
-    return str(request.base_url).rstrip("/") + url_path
-
-
-def insert_row(db: sqlite3.Connection, table: str, data: Dict[str, Any]) -> None:
-    keys = list(data.keys())
-    placeholders = ", ".join(["?"] * len(keys))
-    columns = ", ".join(keys)
-    sql = f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"
-    db.execute(sql, [data[k] for k in keys])
-
-
-def upsert_row(db: sqlite3.Connection, table: str, data: Dict[str, Any]) -> None:
-    keys = list(data.keys())
-    placeholders = ", ".join(["?"] * len(keys))
-    columns = ", ".join(keys)
-    update_clause = ", ".join([f"{k}=excluded.{k}" for k in keys if k != "event_uid"])
-    sql = f"""
-        INSERT INTO {table} ({columns}) VALUES ({placeholders})
-        ON CONFLICT(event_uid) DO UPDATE SET {update_clause}
-    """
-    db.execute(sql, [data[k] for k in keys])
-
-
-def update_by_key(db: sqlite3.Connection, table: str, key_col: str, key_val: str, data: Dict[str, Any]) -> None:
-    if not data:
-        return
-    keys = list(data.keys())
-    set_clause = ", ".join([f"{k}=?" for k in keys])
-    sql = f"UPDATE {table} SET {set_clause} WHERE {key_col}=?"
-    db.execute(sql, [data[k] for k in keys] + [key_val])
-
-
-def get_session_by_id(db: sqlite3.Connection, session_id: str) -> Optional[Dict[str, Any]]:
-    row = db.execute("SELECT * FROM access_sessions WHERE session_id=?", (session_id,)).fetchone()
-    return row_to_dict(row)
-
-
-def get_vehicle_log(db: sqlite3.Connection, event_uid: str) -> Optional[Dict[str, Any]]:
-    row = db.execute("SELECT * FROM vehicle_access_logs WHERE event_uid=?", (event_uid,)).fetchone()
-    return row_to_dict(row)
-
-
-def get_person_log(db: sqlite3.Connection, event_uid: str) -> Optional[Dict[str, Any]]:
-    row = db.execute("SELECT * FROM person_access_logs WHERE event_uid=?", (event_uid,)).fetchone()
-    return row_to_dict(row)
-
-
-def get_vehicle_log_by_session_id(db: sqlite3.Connection, session_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not session_id:
-        return None
-    row = db.execute(
-        "SELECT * FROM vehicle_access_logs WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
-        (session_id,),
-    ).fetchone()
-    return row_to_dict(row)
-
-
-def get_person_log_by_session_id(db: sqlite3.Connection, session_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not session_id:
-        return None
-    row = db.execute(
-        "SELECT * FROM person_access_logs WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
-        (session_id,),
-    ).fetchone()
-    return row_to_dict(row)
-
-
-def find_session_by_event_uid(db: sqlite3.Connection, event_uid: str) -> Optional[Dict[str, Any]]:
-    row = db.execute(
-        """
-        SELECT * FROM access_sessions
-        WHERE event_uid=? OR linked_vehicle_event_uid=?
-        LIMIT 1
-        """,
-        (event_uid, event_uid),
-    ).fetchone()
-    if row:
-        return row_to_dict(row)
-
-    vehicle = get_vehicle_log(db, event_uid)
-    if vehicle:
-        return get_session_by_id(db, vehicle["session_id"])
-
-    person = get_person_log(db, event_uid)
-    if person:
-        return get_session_by_id(db, person["session_id"])
-
-    return None
-
-
-def build_session_detail(db: sqlite3.Connection, event_uid: str) -> Dict[str, Any]:
-    session = find_session_by_event_uid(db, event_uid)
-    if not session:
-        raise HTTPException(status_code=404, detail="Không tìm thấy event_uid/session")
-
-    session_id = session.get("session_id")
-    vehicle_log = get_vehicle_log(db, event_uid) or get_vehicle_log_by_session_id(db, session_id)
-    person_log = get_person_log(db, event_uid) or get_person_log_by_session_id(db, session_id)
-
-    return {"session": session, "vehicle": vehicle_log, "person": person_log}
-
-
-def get_ticket_by_id(db: sqlite3.Connection, ticket_id: str) -> Optional[Dict[str, Any]]:
-    row = db.execute("SELECT * FROM tickets WHERE ticket_id=?", (ticket_id,)).fetchone()
-    return row_to_dict(row)
-
-
-def get_ticket_by_code(db: sqlite3.Connection, ticket_code: str) -> Optional[Dict[str, Any]]:
-    row = db.execute("SELECT * FROM tickets WHERE ticket_code=?", (ticket_code,)).fetchone()
-    return row_to_dict(row)
-
-
-def get_latest_ticket_by_session_id(db: sqlite3.Connection, session_id: str) -> Optional[Dict[str, Any]]:
-    row = db.execute(
-        "SELECT * FROM tickets WHERE session_id=? ORDER BY issued_at DESC LIMIT 1",
-        (session_id,),
-    ).fetchone()
-    return row_to_dict(row)
-
-
-def build_ticket_payload(ticket: Dict[str, Any], session: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    payload = dict(ticket)
-    if session:
-        payload["session"] = session
-    return payload
 
 
 def issue_ticket_for_session(

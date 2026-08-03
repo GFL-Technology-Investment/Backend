@@ -21,9 +21,10 @@ from app.core.status import (
     ORG_HEADER_REQUIRED,
     ORG_MISMATCH,
     PERMISSION_DENIED,
+    AUTH_SESSION_STORE_UNAVAILABLE,
 )
 from app.database import get_db
-from app.services.session_service import get_session, touch_session
+from app.services.session_service import SessionStoreUnavailable, get_session
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -91,14 +92,20 @@ async def require_internal_auth(
         if not session_id:
             raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Internal token missing session_id")
 
-        session = await get_session(session_id)
+        try:
+            session = await get_session(session_id)
+        except SessionStoreUnavailable as exc:
+            raise AuthError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                AUTH_SESSION_STORE_UNAVAILABLE,
+                "Session store unavailable",
+            ) from exc
         if not session:
             raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Session revoked or expired")
 
         if session.get("user_id") != user_id or session.get("organization_id") != organization_id:
             raise AuthError(status.HTTP_401_UNAUTHORIZED, AUTH_INVALID_TOKEN, "Session does not match token claims")
 
-        await touch_session(session_id)
 
     row = db.execute("SELECT * FROM users WHERE user_id = ? AND is_active = 1", (user_id,)).fetchone()
     if not row:

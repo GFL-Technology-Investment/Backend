@@ -11,6 +11,8 @@ from app.api.deps.auth import require_permission
 from app.core.security import hash_password
 from app.database import get_db
 from app.services.rbac_service import get_user_roles_and_permissions
+from app.services.session_service import SessionStoreUnavailable
+from app.services.user_revoke_service import revoke_user_sessions
 
 router = APIRouter()
 
@@ -191,15 +193,17 @@ async def delete_user(
     db: sqlite3.Connection = Depends(get_db),
     _auth=Depends(require_permission("system.user.delete")),
 ):
-    """Soft-delete (is_active=0) — KHÔNG xóa cứng, vì user_id còn được tham
-    chiếu ở refresh_tokens/audit_logs (lịch sử tra soát cần giữ nguyên)."""
     row = db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="User not found")
 
-    db.execute("UPDATE users SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (user_id,))
-    db.execute("UPDATE refresh_tokens SET is_revoked = 1 WHERE user_id = ?", (user_id,))  # đăng xuất ngay lập tức
-    db.commit()
+    try:
+        await revoke_user_sessions(db, user_id)
+    except SessionStoreUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"status": "AUTH_SESSION_STORE_UNAVAILABLE", "message": "Session store unavailable"},
+        ) from exc
     return {"status": "SUCCESS", "message": "Đã khóa tài khoản"}
 
 
@@ -224,10 +228,6 @@ async def assign_user_roles(
         if not role_row:
             raise HTTPException(status_code=400, detail={"status": "ROLE_NOT_FOUND", "message": f"Role '{role_code}' không tồn tại"})
         role_ids.append(role_row["role_id"])
-
-    # Thay thế toàn bộ (xóa hết role cũ, gán lại đúng danh sách mới) — đơn
-    # giản hơn cho FE (gửi nguyên danh sách mong muốn), thay vì phải tự tính
-    # diff thêm/bớt.
     db.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
     for role_id in role_ids:
         db.execute(

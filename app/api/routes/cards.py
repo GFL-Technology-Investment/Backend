@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api.deps.auth import require_permission
-from app.api.routes.access import checkout_access_session
 from app.database import get_db
 from app.services import card_service
+from app.services.access_session_service import checkout_access_session
 from app.services.access_service import get_session_by_id
 
 router = APIRouter()
