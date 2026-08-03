@@ -37,7 +37,7 @@ async def get_list_user(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     db: sqlite3.Connection = Depends(get_db),
-    _auth=Depends(require_permission("system.user.update")),
+    _auth=Depends(require_permission("user.read")),
 ):
     offset = (page - 1) * limit
     rows = db.execute(
@@ -52,7 +52,7 @@ async def get_list_user(
 async def get_user_by_id(
     user_id: str,
     db: sqlite3.Connection = Depends(get_db),
-    _auth=Depends(require_permission("system.user.update")),
+    _auth=Depends(require_permission("user.read")),
 ):
     row = db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
     if not row:

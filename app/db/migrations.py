@@ -155,6 +155,7 @@ def migrate_rbac_permissions(conn: sqlite3.Connection) -> None:
     if not manager:
         return
     for code in (
+        "user.read",
         "role.create", "role.read", "role.update", "role.delete", "role.assign",
         "permission.read", "permission.assign",
     ):
