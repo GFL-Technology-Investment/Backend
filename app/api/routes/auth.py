@@ -195,32 +195,37 @@ async def login(
 ):
     email = normalize_email(payload.email)
 
-    # ==========================
-    # 1. Dev account
-    # ==========================
     if settings.auth_dev_mode:
         dev_user = DEV_USERS.get(email)
 
         if dev_user:
             if dev_user["password"] != payload.password:
                 raise HTTPException(
-                    status_code=401,
+                    status_code=status.HTTP_401_UNAUTHORIZED,
                     detail={
                         "status": "INVALID_CREDENTIALS",
                         "message": "Invalid email or password",
                     },
                 )
 
-            refresh_raw, session_id = await _issue_refresh_token(
-                db=db,
-                user_id=dev_user["user_id"],
-                organization_id=dev_user["org_id"],
-                email=dev_user["email"],
-                roles=dev_user["roles"],
-                permissions=dev_user["permissions"],
-            )
-            db.commit()
-
+            try:
+                with db:
+                    refresh_raw, session_id = await _issue_refresh_token(
+                        db=db,
+                        user_id=dev_user["user_id"],
+                        organization_id=dev_user["org_id"],
+                        email=dev_user["email"],
+                        roles=dev_user["roles"],
+                        permissions=dev_user["permissions"],
+                    )
+            except Exception as e:
+                logger.error("Lỗi cấp token Dev Mode: %s", e)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={"status": "SERVER_ERROR", "message": "Lỗi hệ thống khi đăng nhập"}
+                )
+                
+            _set_refresh_cookie(response, refresh_raw)
             return _build_token_response(
                 user_id=dev_user["user_id"],
                 email=dev_user["email"],
@@ -238,9 +243,6 @@ async def login(
                 },
             )
 
-    # ==========================
-    # 2. User trong DB
-    # ==========================
     user_row = db.execute(
         "SELECT * FROM users WHERE email=? AND is_active=1",
         (email,),
@@ -252,7 +254,7 @@ async def login(
         or not verify_password(payload.password, user_row["password_hash"])
     ):
         raise HTTPException(
-            status_code=401,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
                 "status": "INVALID_CREDENTIALS",
                 "message": "Invalid email or password",
@@ -264,15 +266,23 @@ async def login(
         user_row["user_id"],
     )
 
-    refresh_raw, session_id = await _issue_refresh_token(
-        db=db,
-        user_id=user_row["user_id"],
-        organization_id=user_row["organization_id"],
-        email=user_row["email"],
-        roles=roles,
-        permissions=permissions,
-    )
-    db.commit()
+    try:
+        with db:
+            refresh_raw, session_id = await _issue_refresh_token(
+                db=db,
+                user_id=user_row["user_id"],
+                organization_id=user_row["organization_id"],
+                email=user_row["email"],
+                roles=roles,
+                permissions=permissions,
+            )
+    except Exception as e:
+        logger.error("Lỗi cấp token Login: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"status": "SERVER_ERROR", "message": "Lỗi hệ thống khi đăng nhập"}
+        )
+    _set_refresh_cookie(response, refresh_raw)
 
     return _build_token_response(
         user_id=user_row["user_id"],
@@ -281,200 +291,208 @@ async def login(
         roles=roles,
         permissions=permissions,
         refresh_token_raw=refresh_raw,
-        session_id=session_id, 
+        session_id=session_id,
     )
+
 @router.post("/refresh")
 async def refresh_access_token(
-    refresh_token: str = Form(..., description="Refresh token nhận được khi login"),
+    response: Response,
+    refresh_token: str = Cookie(None, alias=settings.refresh_cookie_name),
     db: sqlite3.Connection = Depends(get_db),
 ):
-    max_hops = 3  # giới hạn số lần "đuổi theo" chuỗi rotation, tránh vòng lặp bất tận
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"status": "MISSING_TOKEN", "message": "Không tìm thấy Refresh Token"},
+        )
+
+    max_hops = 3  
     current_hash = hash_refresh_token(refresh_token)
 
     for _hop in range(max_hops):
         new_refresh_id = str(uuid.uuid4())
+        
+        db.execute("BEGIN TRANSACTION")
+        
+        try:
+            claim = db.execute(
+                """
+                UPDATE refresh_tokens
+                SET replaced_by = ?, rotated_at = datetime('now')
+                WHERE token_hash = ?
+                  AND is_revoked = 0
+                  AND replaced_by IS NULL
+                  AND expires_at > datetime('now')
+                """,
+                (new_refresh_id, current_hash),
+            )
 
-        # Atomic claim: chỉ 1 request duy nhất có thể update thành công dòng này
-        claim = db.execute(
-            """
-            UPDATE refresh_tokens
-            SET replaced_by = ?, rotated_at = datetime('now')
-            WHERE token_hash = ?
-              AND is_revoked = 0
-              AND replaced_by IS NULL
-              AND expires_at > datetime('now')
-            """,
-            (new_refresh_id, current_hash),
-        )
+            if claim.rowcount == 1:
+                row = db.execute("SELECT * FROM refresh_tokens WHERE token_hash = ?", (current_hash,)).fetchone()
+                
+                user_row = db.execute(
+                    "SELECT * FROM users WHERE user_id = ? AND is_active = 1", (row["user_id"],)
+                ).fetchone()
 
-        if claim.rowcount == 1:
-            # Thắng race — chỉ request này được phép rotate token
-            row = db.execute(
-                "SELECT * FROM refresh_tokens WHERE token_hash = ?", (current_hash,)
-            ).fetchone()
-
-            user_row = db.execute(
-                "SELECT * FROM users WHERE user_id = ? AND is_active = 1", (row["user_id"],)
-            ).fetchone()
-            if not user_row:
-                db.commit()
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail={"status": "USER_INACTIVE", "message": "Tài khoản không tồn tại hoặc đã bị khóa"},
-                )
-
-            roles, permissions = get_user_roles_and_permissions(db, user_row["user_id"])
-            session_id = row["session_id"]
-
-            if session_id:
-                session = await get_session(session_id)
-                if not session:
-                    db.execute(
-                        "UPDATE refresh_tokens SET is_revoked = 1 WHERE refresh_token_id = ?",
-                        (row["refresh_token_id"],),
-                    )
+                if not user_row:
+                    db.execute("ROLLBACK")
+                    db.execute("UPDATE refresh_tokens SET is_revoked = 1 WHERE token_hash = ?", (current_hash,))
                     db.commit()
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail={"status": "SESSION_REVOKED", "message": "Phiên đăng nhập đã hết hạn hoặc bị thu hồi"},
+                        detail={"status": "USER_INACTIVE", "message": "Tài khoản không tồn tại hoặc đã bị khóa"},
                     )
-            else:
-                session_id = await create_session(
+
+                roles, permissions = get_user_roles_and_permissions(db, user_row["user_id"])
+                session_id = row["session_id"]
+
+                if session_id:
+                    session = await get_session(session_id)
+                    if not session:
+                        db.execute("ROLLBACK")
+                        db.execute("UPDATE refresh_tokens SET is_revoked = 1 WHERE token_hash = ?", (current_hash,))
+                        db.commit()
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail={"status": "SESSION_REVOKED", "message": "Phiên đăng nhập đã hết hạn hoặc bị thu hồi"},
+                        )
+                else:
+                    session_id = await create_session(
+                        user_id=user_row["user_id"],
+                        email=user_row["email"],
+                        organization_id=row["organization_id"],
+                        roles=roles,
+                        permissions=permissions,
+                        refresh_token_hash=current_hash,
+                    )
+
+                new_raw = generate_refresh_token()
+                new_hash = hash_refresh_token(new_raw)
+                now_sql = db.execute("SELECT datetime('now') AS n").fetchone()["n"]
+                expires_sql = db.execute(
+                    "SELECT datetime('now', ?) AS e",
+                    (f"+{settings.refresh_token_expire_seconds} seconds",),
+                ).fetchone()["e"]
+
+                await update_session(
+                    session_id,
                     user_id=user_row["user_id"],
                     email=user_row["email"],
                     organization_id=row["organization_id"],
                     roles=roles,
                     permissions=permissions,
-                    refresh_token_hash=current_hash,
+                    refresh_token_hash=new_hash,
                 )
 
-            new_raw = generate_refresh_token()
-            new_hash = hash_refresh_token(new_raw)
-            now_sql = db.execute("SELECT datetime('now') AS n").fetchone()["n"]
-            expires_sql = db.execute(
-                "SELECT datetime('now', ?) AS e",
-                (f"+{settings.refresh_token_expire_seconds} seconds",),
-            ).fetchone()["e"]
+                db.execute(
+                    """
+                    INSERT INTO refresh_tokens
+                        (refresh_token_id, user_id, token_hash, organization_id, session_id, issued_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (new_refresh_id, row["user_id"], new_hash, row["organization_id"], session_id, now_sql, expires_sql),
+                )
+                
+                db.commit()
+                _set_refresh_cookie(response, new_raw)
 
-            await update_session(
-                session_id,
-                user_id=user_row["user_id"],
-                email=user_row["email"],
-                organization_id=row["organization_id"],
-                roles=roles,
-                permissions=permissions,
-                refresh_token_hash=new_hash,
-            )
+                return _build_token_response(
+                    user_id=user_row["user_id"],
+                    email=user_row["email"],
+                    org_id=row["organization_id"],
+                    roles=roles,
+                    permissions=permissions,
+                    refresh_token_raw=new_raw,
+                    session_id=session_id,
+                )
+            
+            else:
+                db.execute("ROLLBACK")
+                
+                row = db.execute("SELECT * FROM refresh_tokens WHERE token_hash = ?", (current_hash,)).fetchone()
 
-            db.execute(
-                """
-                INSERT INTO refresh_tokens
-                    (refresh_token_id, user_id, token_hash, organization_id, session_id, issued_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    new_refresh_id,
-                    row["user_id"],
-                    new_hash,
-                    row["organization_id"],
-                    session_id,
-                    now_sql,
-                    expires_sql,
-                ),
-            )
-            db.commit()
-            _set_refresh_cookie(response, refresh_raw)
-
-            return _build_token_response(
-                user_id=user_row["user_id"],
-                email=user_row["email"],
-                org_id=row["organization_id"],
-                roles=roles,
-                permissions=permissions,
-                refresh_token_raw=new_raw,
-                session_id=session_id,
-            )
-
-        # Thua race — xem lý do chính xác để quyết định bước tiếp theo
-        row = db.execute(
-            "SELECT * FROM refresh_tokens WHERE token_hash = ?", (current_hash,)
-        ).fetchone()
-
-        if not row:
-            logger.warning("refresh_token not found in DB, hash=%s...", current_hash[:12])
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"status": "INVALID_REFRESH_TOKEN", "message": "Refresh token không hợp lệ"},
-            )
-
-        if int(row["is_revoked"] or 0) == 1:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"status": "REFRESH_TOKEN_REVOKED", "message": "Refresh token đã bị thu hồi"},
-            )
-
-        expired = db.execute(
-            "SELECT CASE WHEN ? <= datetime('now') THEN 1 ELSE 0 END AS expired",
-            (row["expires_at"],),
-        ).fetchone()["expired"]
-        if expired:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"status": "REFRESH_TOKEN_EXPIRED", "message": "Refresh token đã hết hạn, vui lòng đăng nhập lại"},
-            )
-
-        if row["replaced_by"] is not None:
-            # Token đã bị rotate — kiểm tra có phải race condition gần đây không
-            within_grace = db.execute(
-                """
-                SELECT CASE
-                    WHEN ? IS NULL THEN 0
-                    WHEN (julianday('now') - julianday(?)) * 86400 <= ? THEN 1
-                    ELSE 0
-                END AS within_grace
-                """,
-                (row["rotated_at"], row["rotated_at"], settings.refresh_token_rotation_grace_seconds),
-            ).fetchone()["within_grace"]
-
-            if within_grace:
-                # Race condition hợp lệ — "đuổi theo" chuỗi rotation, thử lại với token kế tiếp
-                successor = db.execute(
-                    "SELECT token_hash FROM refresh_tokens WHERE refresh_token_id = ?",
-                    (row["replaced_by"],),
-                ).fetchone()
-                if successor:
-                    logger.info(
-                        "refresh race condition detected (within grace), chaining to successor"
+                if not row:
+                    logger.warning("Refresh_token not found in DB, hash=%s...", current_hash[:12])
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail={"status": "INVALID_REFRESH_TOKEN", "message": "Refresh token không hợp lệ"},
                     )
-                    current_hash = successor["token_hash"]
-                    continue  # thử claim lại với token kế tiếp trong chuỗi
 
-            # Ngoài grace period → coi là reuse thật sự, revoke toàn bộ
-            db.execute(
-                "UPDATE refresh_tokens SET is_revoked = 1 WHERE user_id = ?",
-                (row["user_id"],),
-            )
-            if row["session_id"]:
-                await delete_session(row["session_id"])
-            db.commit()
+                if int(row["is_revoked"] or 0) == 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail={"status": "REFRESH_TOKEN_REVOKED", "message": "Refresh token đã bị thu hồi"},
+                    )
+
+                expired = db.execute(
+                    "SELECT CASE WHEN ? <= datetime('now') THEN 1 ELSE 0 END AS expired",
+                    (row["expires_at"],),
+                ).fetchone()["expired"]
+                
+                if expired:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail={"status": "REFRESH_TOKEN_EXPIRED", "message": "Refresh token đã hết hạn, vui lòng đăng nhập lại"},
+                    )
+
+                if row["replaced_by"] is not None:
+                    within_grace = db.execute(
+                        """
+                        SELECT CASE
+                            WHEN ? IS NULL THEN 0
+                            WHEN (julianday('now') - julianday(?)) * 86400 <= ? THEN 1
+                            ELSE 0
+                        END AS within_grace
+                        """,
+                        (row["rotated_at"], row["rotated_at"], settings.refresh_token_rotation_grace_seconds),
+                    ).fetchone()["within_grace"]
+
+                    if within_grace:
+                        successor = db.execute(
+                            "SELECT token_hash FROM refresh_tokens WHERE refresh_token_id = ?",
+                            (row["replaced_by"],),
+                        ).fetchone()
+                        
+                        if successor:
+                            logger.info("Refresh race condition detected (within grace), chaining to successor")
+                            current_hash = successor["token_hash"]
+                            continue
+                    
+                    db.execute(
+                        "UPDATE refresh_tokens SET is_revoked = 1 WHERE session_id = ?",
+                        (row["session_id"],),
+                    )
+                    db.commit()
+                    
+                    if row["session_id"]:
+                        await delete_session(row["session_id"])
+                        
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail={
+                            "status": "REFRESH_TOKEN_REUSE_DETECTED",
+                            "message": "Phát hiện tái sử dụng refresh token. Phiên đăng nhập trên thiết bị này đã bị thu hồi.",
+                        },
+                    )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.execute("ROLLBACK")
+            logger.error("Lỗi trong quá trình refresh token: %s", e)
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={
-                    "status": "REFRESH_TOKEN_REUSE_DETECTED",
-                    "message": "Phát hiện tái sử dụng refresh token. Toàn bộ phiên đã bị thu hồi.",
-                },
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"status": "SERVER_ERROR", "message": "Lỗi hệ thống khi làm mới token"},
             )
-        continue
 
-    # Hết số lần thử cho phép
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
-        detail={"status": "REFRESH_CONFLICT", "message": "Quá nhiều request refresh đồng thời, vui lòng thử lại"},
+        detail={"status": "REFRESH_CONFLICT", "message": "Quá nhiều request refresh đồng thời, vui lòng thử lại sau giây lát"},
     )
-
 
 @router.post("/logout")
 async def logout(
+    response: Response,
     provider: Optional[str] = Form(None, description="Provider đã dùng để login (keycloak/azure). Bỏ trống nếu login bằng dev-login."),
     refresh_token: Optional[str] = Form(None, description="Refresh token cần thu hồi"),
     auth: InternalAuthContext = Depends(require_internal_auth),
@@ -515,11 +533,7 @@ async def logout(
                 logout_url = f"{end_session_endpoint}?post_logout_redirect_uri={settings.frontend_url}/login"
         except Exception as exc:
             logger.warning("Không lấy được end_session_endpoint cho provider=%s: %s", provider, exc)
-            # Không raise — đăng xuất khỏi hệ thống nội bộ (refresh token đã
-            # thu hồi ở trên) vẫn phải thành công dù không lấy được logout_url
-            # của IdP. Giống nguyên tắc audit log: phần phụ trợ lỗi không
-            # được phá luồng chính.
-
+    _clear_refresh_cookie(response)
     return {
         "status": "SUCCESS",
         "message": "Đã đăng xuất thành công",
@@ -561,6 +575,7 @@ class AzureExchangeRequest(BaseModel):
 
 @router.post("/azure/exchange")
 async def azure_exchange(
+    response: Response,
     payload: AzureExchangeRequest,
     db: sqlite3.Connection = Depends(get_db),
 ):
@@ -588,72 +603,82 @@ async def azure_exchange(
         or settings.default_organization_id
     )
 
-    # BƯỚC 1 — provider + provider_sub này đã từng liên kết với user nào chưa?
-    identity_row = db.execute(
-        "SELECT user_id FROM user_identity_providers WHERE provider = ? AND provider_sub = ?",
-        (payload.provider, provider_sub),
-    ).fetchone()
+    try:
+        with db: 
+            identity_row = db.execute(
+                "SELECT user_id FROM user_identity_providers WHERE provider = ? AND provider_sub = ?",
+                (payload.provider, provider_sub),
+            ).fetchone()
 
-    if identity_row:
-        # Đã liên kết trước đó -> dùng ĐÚNG user_id đã gắn, KHÔNG tra lại theo
-        # email (an toàn hơn: email đổi ở IdP vẫn nhận đúng user cũ, không vô
-        # tình tạo user trùng).
-        user_row = db.execute(
-            "SELECT * FROM users WHERE user_id = ?", (identity_row["user_id"],)
-        ).fetchone()
-        if not user_row:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"status": "AUTH_INVALID_TOKEN", "message": "Liên kết định danh không hợp lệ"},
+            if identity_row:
+                user_row = db.execute(
+                    "SELECT * FROM users WHERE user_id = ?", (identity_row["user_id"],)
+                ).fetchone()
+                if not user_row:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail={"status": "AUTH_INVALID_TOKEN", "message": "Liên kết định danh không hợp lệ"},
+                    )
+            else:
+                is_email_verified = claims.get("email_verified", True) 
+
+                user_row = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+
+                if user_row:
+                    if not is_email_verified:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={"status": "EMAIL_NOT_VERIFIED", "message": "Email từ Provider chưa được xác minh, không thể liên kết tài khoản."}
+                        )
+                else:
+                    new_user_id = str(uuid.uuid4())
+                    db.execute(
+                        """
+                        INSERT INTO users (user_id, email, full_name, organization_id, roles, permissions, is_active)
+                        VALUES (?, ?, ?, ?, ?, ?, 1)
+                        """,
+                        (new_user_id, email, claims.get("name", ""), org_id, json.dumps(roles), json.dumps(permissions)),
+                    )
+                    
+                    assign_default_role(db, user_id=new_user_id, role_code="GUARD")
+                    
+                    user_row = db.execute("SELECT * FROM users WHERE user_id = ?", (new_user_id,)).fetchone()
+
+                db.execute(
+                    """
+                    INSERT INTO user_identity_providers (identity_id, user_id, provider, provider_sub, email_at_link)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (str(uuid.uuid4()), user_row["user_id"], payload.provider, provider_sub, email),
+                )
+
+            if not int(user_row["is_active"] or 0):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"status": "USER_INACTIVE", "message": "Tài khoản đã bị khóa"},
+                )
+
+            user_id = user_row["user_id"]
+            org_id = user_row["organization_id"]
+            roles, permissions = get_user_roles_and_permissions(db, user_id)
+
+            refresh_raw, session_id = await _issue_refresh_token(
+                db=db,
+                user_id=user_id,
+                organization_id=org_id,
+                email=user_row["email"],
+                roles=roles,
+                permissions=permissions,
             )
-    else:
-        # BƯỚC 2 — chưa liên kết provider NÀY, thử tìm user theo email (trường
-        # hợp: user đã tồn tại từ trước, đây là lần đầu họ login bằng provider mới)
-        user_row = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-
-        if user_row is None:
-            # BƯỚC 3 — chưa có user nào khớp -> JIT provisioning, tạo mới
-            user_id = str(uuid.uuid4())
-            db.execute(
-                """
-                INSERT INTO users (user_id, email, full_name, organization_id, roles, permissions, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
-                """,
-                (user_id, email, claims.get("name", ""), org_id, json.dumps(roles), json.dumps(permissions)),
-            )
-            user_row = db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
-
-        # Gắn liên kết provider <-> user (dù user vừa tạo mới hay đã có sẵn)
-        db.execute(
-            """
-            INSERT INTO user_identity_providers (identity_id, user_id, provider, provider_sub, email_at_link)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (str(uuid.uuid4()), user_row["user_id"], payload.provider, provider_sub, email),
-        )
-
-    if not int(user_row["is_active"] or 0):
+            
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"status": "USER_INACTIVE", "message": "Tài khoản đã bị khóa"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"status": "SERVER_ERROR", "message": "Lỗi hệ thống trong quá trình đăng nhập."}
         )
 
-    user_id = user_row["user_id"]
-    org_id = user_row["organization_id"]
-    roles, permissions = get_user_roles_and_permissions(
-        db,
-        user_id,
-    )
-
-    refresh_raw, session_id = await _issue_refresh_token(
-        db=db,
-        user_id=user_id,
-        organization_id=org_id,
-        email=user_row["email"],
-        roles=roles,
-        permissions=permissions,
-    )
-    db.commit()
     _set_refresh_cookie(response, refresh_raw)
 
     return _build_token_response(

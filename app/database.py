@@ -164,6 +164,14 @@ _PERMISSION_SEED = [
     ("system.org.create", "Tạo tổ chức", "system"),
     ("system.org.update", "Sửa tổ chức", "system"),
     ("system.org.delete", "Khóa tổ chức", "system"),
+    ("role.create", "Tao role", "system"),
+    ("role.read", "Xem role", "system"),
+    ("role.update", "Sua role", "system"),
+    ("role.delete", "Xoa role", "system"),
+    ("permission.create", "Tao permission", "system"),
+    ("permission.read", "Xem permission", "system"),
+    ("permission.update", "Sua permission", "system"),
+    ("permission.delete", "Xoa permission", "system"),
 ]
 
 _ROLE_PERMISSION_SEED = {
@@ -172,11 +180,13 @@ _ROLE_PERMISSION_SEED = {
         "camera.view", "camera.manage", "ticket.issue", "ticket.print",
         "vehicle.approve", "report.export",
         "system.user.create", "system.user.update", "system.user.delete",
-        "role.assign", "system.org.create", "system.org.update", "system.org.delete",
-        "camera.view", "ticket.issue", "vehicle.approve", "card.link", "card.checkout"
+        "role.create", "role.read", "role.update", "role.delete", "role.assign",
+        "permission.create", "permission.read", "permission.update", "permission.delete", "permission.assign",
+        "system.org.create", "system.org.update", "system.org.delete",
+        "card.link", "card.checkout"
     ],
 
-    "GUARD": ["camera.view", "ticket.issue", "ticket.print","vehicle.approve","camera.view", "ticket.issue", "vehicle.approve", "card.link", "card.checkout"],
+    "GUARD": ["camera.view", "ticket.issue", "ticket.print", "vehicle.approve", "card.link", "card.checkout"],
 
 }
 
@@ -394,6 +404,29 @@ def seed_rbac_data(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT OR IGNORE INTO role_permissions (role_permission_id, role_id, permission_id) VALUES (?, ?, ?)",
                 (str(uuid.uuid4()), role_row["role_id"], permission_id),
+            )
+
+
+def migrate_rbac_permissions(conn: sqlite3.Connection) -> None:
+    """Idempotently add granular RBAC permissions to an existing SQLite DB."""
+    for code, name, module in _PERMISSION_SEED:
+        conn.execute(
+            "INSERT OR IGNORE INTO permissions (permission_id, permission_code, permission_name, module_name) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), code, name, module),
+        )
+
+    manager = conn.execute("SELECT role_id FROM roles WHERE role_code = 'MANAGER'").fetchone()
+    if not manager:
+        return
+    for code in (
+        "role.create", "role.read", "role.update", "role.delete", "role.assign",
+        "permission.create", "permission.read", "permission.update", "permission.delete", "permission.assign",
+    ):
+        permission = conn.execute("SELECT permission_id FROM permissions WHERE permission_code = ?", (code,)).fetchone()
+        if permission:
+            conn.execute(
+                "INSERT OR IGNORE INTO role_permissions (role_permission_id, role_id, permission_id) VALUES (?, ?, ?)",
+                (str(uuid.uuid4()), manager["role_id"], permission["permission_id"]),
             )
 
 
@@ -617,6 +650,7 @@ def init_db() -> None:
         migrate_users_password_hash(conn)
         migrate_refresh_tokens_schema(conn)
         seed_rbac_data(conn)                    
+        migrate_rbac_permissions(conn)
         seed_auth_data(conn)                    
         migrate_user_identity_providers(conn)   
         migrate_legacy_user_roles(conn)         

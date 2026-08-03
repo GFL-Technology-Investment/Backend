@@ -14,13 +14,13 @@ router = APIRouter()
 
 
 @router.get("/api/v1/roles")
-async def list_roles(db: sqlite3.Connection = Depends(get_db), _auth=Depends(require_permission("role.assign"))):
+async def list_roles(db: sqlite3.Connection = Depends(get_db), _auth=Depends(require_permission("role.read"))):
     rows = db.execute("SELECT * FROM roles ORDER BY role_name").fetchall()
     return {"roles": [dict(r) for r in rows]}
 
 
 @router.get("/api/v1/roles/{role_id}")
-async def get_role(role_id: str, db: sqlite3.Connection = Depends(get_db), _auth=Depends(require_permission("role.assign"))):
+async def get_role(role_id: str, db: sqlite3.Connection = Depends(get_db), _auth=Depends(require_permission("role.read"))):
     row = db.execute("SELECT * FROM roles WHERE role_id = ?", (role_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Role not found")
@@ -49,7 +49,7 @@ class CreateRoleRequest(BaseModel):
 async def create_role(
     payload: CreateRoleRequest,
     db: sqlite3.Connection = Depends(get_db),
-    _auth=Depends(require_permission("role.assign")),
+    _auth=Depends(require_permission("role.create")),
 ):
     existing = db.execute("SELECT role_id FROM roles WHERE role_code = ?", (payload.role_code,)).fetchone()
     if existing:
@@ -74,11 +74,8 @@ async def update_role(
     role_id: str,
     payload: UpdateRoleRequest,
     db: sqlite3.Connection = Depends(get_db),
-    _auth=Depends(require_permission("role.assign")),
+    _auth=Depends(require_permission("role.update")),
 ):
-    """Cố tình KHÔNG cho sửa role_code — đây là giá trị được nhúng thẳng vào
-    JWT (claim "roles"), đổi giữa chừng sẽ làm mọi token cũ đang lưu ở FE
-    tham chiếu sai role, và mọi nơi check role cứng theo string sẽ lệch."""
     row = db.execute("SELECT * FROM roles WHERE role_id = ?", (role_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Role not found")
@@ -100,7 +97,7 @@ async def update_role(
 
 
 @router.delete("/api/v1/roles/{role_id}")
-async def delete_role(role_id: str, db: sqlite3.Connection = Depends(get_db), _auth=Depends(require_permission("role.assign"))):
+async def delete_role(role_id: str, db: sqlite3.Connection = Depends(get_db), _auth=Depends(require_permission("role.delete"))):
     row = db.execute("SELECT * FROM roles WHERE role_id = ?", (role_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Role not found")
@@ -131,10 +128,6 @@ async def set_role_permissions(
     db: sqlite3.Connection = Depends(get_db),
     _auth=Depends(require_permission("permission.assign")),
 ):
-    """Thay thế TOÀN BỘ permission của role bằng danh sách mới gửi lên —
-    đây là hành động mạnh nhất trong toàn bộ hệ thống RBAC (ảnh hưởng NGAY
-    LẬP TỨC mọi user đang có role này), nên gắn permission riêng biệt
-    ("permission.assign"), tách khỏi "role.assign" (chỉ gán role cho 1 user)."""
     role_row = db.execute("SELECT role_id, is_system FROM roles WHERE role_id = ?", (role_id,)).fetchone()
     if not role_row:
         raise HTTPException(status_code=404, detail="Role not found")
